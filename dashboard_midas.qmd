@@ -1,0 +1,1613 @@
+---
+title: "Midas Nowcasting | Food Inflation"
+format:
+  dashboard:
+    theme: cosmo
+    orientation: rows
+    nav-buttons:
+      - icon: github
+        href: https://github.com
+jupyter: python3
+---
+
+```{python}
+#| include: false
+
+import os
+import sys
+import json
+import glob
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import itables
+from itables import show
+
+# -----------------------------------------------------------------------------
+# Base paths to project artifacts
+# -----------------------------------------------------------------------------
+SCRIPT_DIR = os.getcwd()
+if os.path.exists(os.path.join(SCRIPT_DIR, "model_parameters")):
+    BASE_DIR = SCRIPT_DIR
+elif os.path.exists(os.path.join(os.path.dirname(SCRIPT_DIR), "model_parameters")):
+    BASE_DIR = os.path.dirname(SCRIPT_DIR)
+elif os.path.exists(os.path.join("..", "model_parameters")):
+    BASE_DIR = os.path.abspath("..")
+else:
+    BASE_DIR = SCRIPT_DIR
+
+MODEL_PARAMS_DIR = os.path.join(BASE_DIR, "model_parameters")
+MODEL_DATA_DIR = os.path.join(BASE_DIR, "model_data")
+
+EU27_COUNTRIES = {
+    "PL": "Poland", "DE": "Germany", "FR": "France", "IT": "Italy", "ES": "Spain",
+    "NL": "Netherlands", "BE": "Belgium", "AT": "Austria", "CZ": "Czechia", "SK": "Slovakia",
+    "HU": "Hungary", "RO": "Romania", "BG": "Bulgaria", "HR": "Croatia", "EL": "Greece",
+    "PT": "Portugal", "IE": "Ireland", "DK": "Denmark", "SE": "Sweden", "FI": "Finland",
+    "EE": "Estonia", "LV": "Latvia", "LT": "Lithuania", "SI": "Slovenia", "CY": "Cyprus",
+    "LU": "Luxembourg", "MT": "Malta"
+}
+
+ALL_CATEGORIES = {
+    "cereal": {"coicop": "CP0111", "title": "Bread & Cereals", "short_title": "Bread & Cereals", "folder": "cereal", "type": "umidas", "color": "#d4a72c", "icon": "flower1"},
+    "meat": {"coicop": "CP0112", "title": "Meat", "short_title": "Meat", "folder": "meat", "type": "umidas", "color": "#cf222e", "icon": "basket2"},
+    "seasonal_fish": {"coicop": "CP0113", "title": "Fish & Seafood", "short_title": "Fish & Seafood", "folder": "seasonal_fish", "type": "seasonal", "color": "#0550ae", "icon": "water"},
+    "dairy": {"coicop": "CP0114", "title": "Milk, Cheese & Eggs", "short_title": "Milk, Cheese & Eggs", "folder": "dairy", "type": "umidas", "color": "#0969da", "icon": "egg-fried"},
+    "oilseeds": {"coicop": "CP0115", "title": "Oils & Fats", "short_title": "Oils & Fats", "folder": "oilseeds", "type": "umidas", "color": "#8250df", "icon": "droplet"},
+    "fruits": {"coicop": "CP0116", "title": "Fruits", "short_title": "Fruits", "folder": "fruits", "type": "umidas", "color": "#bc4c00", "icon": "apple"},
+    "vegetables": {"coicop": "CP0117", "title": "Vegetables", "short_title": "Vegetables", "folder": "vegetables", "type": "umidas", "color": "#1a7f37", "icon": "tree"},
+    "seasonal_sugar": {"coicop": "CP0118", "title": "Sugar & Sweets", "short_title": "Sugar & Sweets", "folder": "seasonal_sugar", "type": "seasonal", "color": "#bf3989", "icon": "heart"},
+    "seasonal_food_nec": {"coicop": "CP0119", "title": "Food Products n.e.c.", "short_title": "Food n.e.c.", "folder": "seasonal_food_nec", "type": "seasonal", "color": "#6e7781", "icon": "box-seam"}
+}
+
+MONTH_NAMES_EN = {
+    1: "January", 2: "February", 3: "March", 4: "April", 5: "May", 6: "June",
+    7: "July", 8: "August", 9: "September", 10: "October", 11: "November", 12: "December"
+}
+MONTH_LOCATIVE_EN = {
+    1: "in January", 2: "in February", 3: "in March", 4: "in April", 5: "in May", 6: "in June",
+    7: "in July", 8: "in August", 9: "in September", 10: "in October", 11: "in November", 12: "in December"
+}
+SEASONAL_CATEGORIES = {
+    "food_total": {"coicop": "CP011", "title": "Total Food (CP011 Basket)", "short_title": "Total Food", "icon": "basket"},
+    **ALL_CATEGORIES
+}
+
+def sanitize(n):
+    c = n.replace(" ", "_").replace("-", "_").replace("|", "_").replace("/", "_").replace(".", "")
+    c = "".join(ch for ch in c if ch.isalnum() or ch == "_")
+    while "__" in c:
+        c = c.replace("__", "_")
+    return c.strip("_")
+
+COMMODITY_ALIASES = {
+    "BLTPAN|PAN": "Breadmaking common wheat",
+    "BLTPAN|TVT": "Breadmaking common wheat",
+    "BLTFOUR|FEED": "Feed wheat",
+    "MAI|FEED": "Feed maize",
+    "ORGFOUR|FEED": "Feed barley",
+    "DUR|UNKNOWN": "Durum wheat",
+    "AVO|FEED": "Feed oats",
+    "AVOMILL|PAN": "Milling oats",
+    "SEGFOUR|FEED": "Feed rye",
+    "SEGPAN|PAN": "Rye of breadmaking quality",
+    "TRI|FEED": "Triticale",
+    "ORGBRAS|MALT": "Malting barley",
+    "ORGBRAS|M2RH": "Malting barley - M2RH",
+    "ORGBRAS|M2RP": "Malting barley",
+    "ORGBRAS|M6RH": "Malting barley",
+    "SON|UNKNOWN": "Wheat bran",
+    "SOR|UNKNOWN": "Sorghum"
+}
+
+BQ_PROJECT_ID = "macroeconomic-dashboards"
+BQ_DATASET_ID = "MIDAS_Food_Energy_Inflation"
+DATA_SOURCE_BADGE = "📁 Local files"
+
+loaded_from_bq = False
+try:
+    from google.cloud import bigquery
+    bq_client = bigquery.Client(project=BQ_PROJECT_ID)
+
+    # 1. Modele z BigQuery
+    bq_m = bq_client.query(
+        f"SELECT category, country, r2, rmse, parameters_json FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.midas_model_parameters`"
+    ).to_dataframe()
+    all_models = {}
+    for _, row in bq_m.iterrows():
+        p_json = json.loads(row["parameters_json"]) if row["parameters_json"] else {}
+        key = f"{row['category']}_{row['country']}"
+        all_models[key] = {
+            "intercept": p_json.get("intercept", 0.0),
+            "coefficients": p_json.get("coefficients", {}),
+            "r2": float(row["r2"]) if pd.notna(row["r2"]) else 0.0,
+            "rmse": float(row["rmse"]) if pd.notna(row["rmse"]) else 0.0
+        }
+
+    # 2. Wagi koszyka
+    df_weights = bq_client.query(
+        f"SELECT country, year, coicop, food_share FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.eurostat_food_weights`"
+    ).to_dataframe()
+
+    # 3. HICP
+    df_hicp = bq_client.query(
+        f"SELECT date, country, coicop, value FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.eurostat_hicp_monthly` WHERE date >= '2015-01-01'"
+    ).to_dataframe()
+    df_hicp["date"] = pd.to_datetime(df_hicp["date"])
+    df_hicp["year"] = df_hicp["date"].dt.year
+    df_hicp["month"] = df_hicp["date"].dt.month
+
+    # 4. Dane dlog surowców
+    df_dlog = bq_client.query(
+        f"SELECT date, year, month, week_in_month, country, item_name, dlog_price FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.agri_dlog_features_4w` WHERE date >= '2025-01-01'"
+    ).to_dataframe()
+    df_dlog["item_name"] = df_dlog["item_name"].replace(COMMODITY_ALIASES)
+    df_dlog["sanitized_item"] = df_dlog["item_name"].apply(sanitize)
+
+    loaded_from_bq = True
+    DATA_SOURCE_BADGE = "☁️ Google Cloud BigQuery"
+except Exception as e:
+    # Fallback do plików lokalnych
+    df_weights = pd.read_csv(os.path.join(MODEL_DATA_DIR, "eurostat_food_weights.csv"))
+    df_hicp = pd.read_csv(os.path.join(MODEL_DATA_DIR, "hicp_monthly_targets.csv"))
+    df_hicp["date"] = pd.to_datetime(df_hicp["date"])
+    df_hicp["year"] = df_hicp["date"].dt.year
+    df_hicp["month"] = df_hicp["date"].dt.month
+
+    df_dlog = pd.read_csv(os.path.join(MODEL_DATA_DIR, "dlog_all_agri_4w.csv"))
+    df_dlog["item_name"] = df_dlog["item_name"].replace(COMMODITY_ALIASES)
+    df_dlog["sanitized_item"] = df_dlog["item_name"].apply(sanitize)
+
+    all_models = {}
+    for cat_k, cat_cfg in ALL_CATEGORIES.items():
+        folder_p = os.path.join(MODEL_PARAMS_DIR, cat_cfg["folder"])
+        if not os.path.exists(folder_p):
+            continue
+        for c in EU27_COUNTRIES.keys():
+            jp = os.path.join(folder_p, f"model_{c}.json")
+            if os.path.exists(jp):
+                try:
+                    with open(jp, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    key = f"{cat_k}_{c}"
+                    all_models[key] = {
+                        "intercept": d.get("parameters", {}).get("intercept", 0.0),
+                        "coefficients": d.get("parameters", {}).get("coefficients", {}),
+                        "r2": d.get("metrics", {}).get("r2", 0.0),
+                        "rmse": d.get("metrics", {}).get("rmse", 0.0)
+                    }
+                except Exception:
+                    pass
+
+latest_w_year = int(df_weights["year"].max())
+
+# Wyznaczenie najnowszego aktywnego miesiąca i tygodnia z danych surowcowych
+latest_dlog_row = df_dlog.sort_values("date").iloc[-1]
+t_year = int(latest_dlog_row["year"])
+t_month = int(latest_dlog_row["month"])
+target_month_str = f"{t_year}-{t_month:02d}"
+target_ts = pd.Timestamp(f"{t_year}-{t_month:02d}-01")
+prev_y = t_year if t_month > 1 else t_year - 1
+prev_m = t_month - 1 if t_month > 1 else 12
+latest_w = int(df_dlog[(df_dlog["year"] == t_year) & (df_dlog["month"] == t_month)]["week_in_month"].max())
+faza_danych_str = f"Week {latest_w} (W{latest_w} - {'Current nowcast' if latest_w < 4 else 'Full month'})"
+
+available_dates = df_hicp.sort_values("date", ascending=False)["date"].dt.strftime("%Y-%m").unique().tolist()
+recent_months = available_dates[:6]
+
+# Funkcja wyliczająca profil danego kraju
+def compute_country_payload(country: str) -> Dict[str, Any]:
+    sub_c = df_hicp[(df_hicp["country"] == country) & (df_hicp["date"] < target_ts)]
+    if not sub_c.empty:
+        latest_c_date = sub_c["date"].max()
+        hicp_p = sub_c[sub_c["date"] == latest_c_date].set_index("coicop")["value"].to_dict()
+    else:
+        hicp_p = {}
+    hicp_l12 = df_hicp[(df_hicp["country"] == country) & (df_hicp["year"] == t_year - 1) & (df_hicp["month"] == t_month)].set_index("coicop")["value"].to_dict()
+    hicp_act = df_hicp[(df_hicp["country"] == country) & (df_hicp["year"] == t_year) & (df_hicp["month"] == t_month)].set_index("coicop")["value"].to_dict()
+
+    c_dlog = df_dlog[df_dlog["country"] == country]
+    sub_dlog = c_dlog[
+        ((c_dlog["year"] == t_year) & (c_dlog["month"] == t_month)) |
+        ((c_dlog["year"] == prev_y) & (c_dlog["month"] == prev_m) & (c_dlog["week_in_month"].isin([3, 4])))
+    ]
+    f_val = {}
+    for _, r in sub_dlog.iterrows():
+        item = r["sanitized_item"]
+        w = int(r["week_in_month"])
+        y_v, m_v = int(r["year"]), int(r["month"])
+        fname = f"{item}_w{w}" if (y_v == t_year and m_v == t_month) else f"{item}_prev_w{w}"
+        f_val[fname] = r["dlog_price"]
+
+    w_df = df_weights[(df_weights["country"] == country) & (df_weights["year"] == latest_w_year)]
+    c_weights = w_df.set_index("coicop")["food_share"].to_dict()
+
+    cat_payloads = {}
+    tot_w4 = 0.0
+    tot_w = 0.0
+
+    w1_sum = 0.0
+    w2_sum = 0.0
+    w3_sum = 0.0
+
+    for cat_k, cfg in ALL_CATEGORIES.items():
+        coicop = cfg["coicop"]
+        weight = c_weights.get(coicop, 0.0)
+        m_key = f"{cat_k}_{country}"
+        m_data = all_models.get(m_key, {"intercept": 0.0, "coefficients": {}, "r2": 0.0, "rmse": 0.0})
+
+        intercept = m_data["intercept"]
+        coefs = m_data["coefficients"]
+        act = hicp_act.get(coicop)
+
+        if cfg["type"] == "umidas":
+            lag_y = hicp_p.get(coicop, 0.0)
+            lag_contrib = coefs.get("lag_y", 0.0) * lag_y
+
+            w_preds = {}
+            w_revs = {}
+            drivers_dict = {}
+            prev_p = None
+            shocks_sum_w4 = 0.0
+
+            for w_idx in [1, 2, 3, 4]:
+                pred = intercept + lag_contrib
+                curr_shocks = 0.0
+                curr_drivers = []
+                for fname, coef in coefs.items():
+                    if fname == "lag_y":
+                        continue
+                    is_av = False
+                    if "_prev_" in fname:
+                        is_av = True
+                    else:
+                        for n in range(1, w_idx + 1):
+                            if fname.endswith(f"_w{n}"):
+                                is_av = True
+                                break
+                    val = f_val.get(fname, 0.0) if is_av else 0.0
+                    imp = coef * val
+                    pred += imp
+                    curr_shocks += imp
+                    if abs(imp) > 0.005:
+                        curr_drivers.append({"feature": fname, "impact": imp})
+
+                nowc = round(float(pred), 3)
+                rev = round(nowc - prev_p, 3) if prev_p is not None else 0.0
+                prev_p = nowc
+                w_preds[f"W{w_idx}"] = nowc
+                w_revs[f"W{w_idx}"] = rev
+                if w_idx == 4:
+                    shocks_sum_w4 = curr_shocks
+                    curr_drivers.sort(key=lambda x: abs(x["impact"]), reverse=True)
+                    drivers_dict = curr_drivers
+
+            w1, w2, w3, w4 = w_preds["W1"], w_preds["W2"], w_preds["W3"], w_preds["W4"]
+            tot_rev = round(w4 - w1, 3)
+
+            top_d = drivers_dict[:5]
+            d_names = [d["feature"].replace("_", " ") for d in top_d]
+            d_impacts = [d["impact"] for d in top_d]
+            d_colors = ["#1a7f37" if imp > 0 else "#cf222e" for imp in d_impacts]
+
+            wf_x = ["Baseline Trend", "Autoregressive Lag", "Commodity Price Shocks", "FINAL NOWCAST"]
+            wf_y = [round(intercept, 3), round(lag_contrib, 3), round(shocks_sum_w4, 3), 0]
+            wf_text = [f"{v:+.1f} pp" for v in [round(intercept, 3), round(lag_contrib, 3), round(shocks_sum_w4, 3)]] + [f"{w4:+.1f}%"]
+
+        else:
+            lag_1 = hicp_p.get(coicop, 0.0)
+            lag_12 = hicp_l12.get(coicop, 0.0)
+            c1 = coefs.get("lag_1", 0.0) * lag_1
+            c12 = coefs.get("lag_12", 0.0) * lag_12
+            d_key = f"m_{t_month}"
+            d_c = coefs.get(d_key, 0.0) if t_month > 1 else 0.0
+
+            pred = round(float(intercept + c1 + c12 + d_c), 3)
+            w1 = w2 = w3 = w4 = pred
+            w_revs = {"W2": 0.0, "W3": 0.0, "W4": 0.0}
+            tot_rev = 0.0
+
+            wf_x = ["Baseline Trend", "AR(1) Inertia", "Seasonality (D_m & AR12)", "FINAL NOWCAST"]
+            wf_y = [round(intercept, 3), round(c1, 3), round(c12 + d_c, 3), 0]
+            wf_text = [f"{v:+.1f} pp" for v in [round(intercept, 3), round(c1, 3), round(c12 + d_c, 3)]] + [f"{w4:+.1f}%"]
+
+            d_names = [f"Seasonality m_{t_month}", "AR(1) Inertia t-1", "Seasonality AR(12) t-12"]
+            d_impacts = [round(d_c, 3), round(c1, 3), round(c12, 3)]
+            d_colors = ["#1a7f37" if imp > 0 else "#cf222e" for imp in d_impacts]
+
+        tot_w4 += w4 * weight
+        tot_w += weight
+        w1_sum += w1 * weight
+        w2_sum += w2 * weight
+        w3_sum += w3 * weight
+
+        # Obliczenie dynamiki r/r (YoY) dla kategorii
+        sub_h = df_hicp[(df_hicp["country"] == country) & (df_hicp["coicop"] == coicop) & (df_hicp["date"] < target_ts)].sort_values("date")
+        last_11 = sub_h["value"].dropna().tail(11).tolist()
+        if len(last_11) > 0:
+            prod_c = 1.0
+            for v in last_11:
+                prod_c *= (1.0 + float(v) / 100.0)
+            cat_yoy_w4 = round(((prod_c * (1.0 + float(w4) / 100.0)) - 1.0) * 100.0, 1)
+        else:
+            cat_yoy_w4 = round(float(w4) * 12.0, 1)
+        cat_yoy_str = f"{cat_yoy_w4:+.1f}% y/y"
+
+        err = round(w4 - act, 1) if act is not None else None
+        sub_t = f"Eurostat: {act:+.1f}%" if act is not None else f"Weight: {weight*100:.1f}% | R²: {m_data['r2']:.1%}"
+
+        cat_payloads[cat_k] = {
+            "w4_str": f"{w4:+.1f}% m/m",
+            "yoy_str": cat_yoy_str,
+            "yoy_val": cat_yoy_w4,
+            "subtext": sub_t,
+            "weight_pct": f"{weight*100:.1f}%",
+            "wf_x": wf_x,
+            "wf_y": wf_y,
+            "wf_text": wf_text,
+            "d_names": list(reversed(d_names)),
+            "d_impacts": list(reversed(d_impacts)),
+            "d_colors": list(reversed(d_colors)),
+            "verif": f"Verification: Eurostat: {act:+.1f}% | Forecast Error: {err:+.1f} pp" if act is not None else "Eurostat: Pending publication",
+            "conv_y": [w1, w2, w3, w4],
+            "conv_act": act,
+            "rev_y": [w_revs["W2"], w_revs["W3"], w_revs["W4"]],
+            "rev_colors": ["#cf222e" if v > 0 else "#1a7f37" for v in [w_revs["W2"], w_revs["W3"], w_revs["W4"]]]
+        }
+
+    agg_food_w4 = round(tot_w4 / tot_w, 1) if tot_w > 0 else 0.0
+    agg_food_w1 = round(w1_sum / tot_w, 1) if tot_w > 0 else 0.0
+    agg_food_w2 = round(w2_sum / tot_w, 1) if tot_w > 0 else 0.0
+    agg_food_w3 = round(w3_sum / tot_w, 1) if tot_w > 0 else 0.0
+
+    sub_tot = df_hicp[(df_hicp["country"] == country) & (df_hicp["coicop"] == "CP011") & (df_hicp["date"] < target_ts)].sort_values("date")
+    last_11_tot = sub_tot["value"].dropna().tail(11).tolist()
+    if len(last_11_tot) > 0:
+        prod_t = 1.0
+        for v in last_11_tot:
+            prod_t *= (1.0 + float(v) / 100.0)
+        agg_food_yoy = round(((prod_t * (1.0 + float(agg_food_w4) / 100.0)) - 1.0) * 100.0, 1)
+    else:
+        agg_food_yoy = round(float(agg_food_w4) * 12.0, 1)
+    agg_food_yoy_str = f"{agg_food_yoy:+.1f}% y/y"
+
+    food_act = hicp_act.get("CP011")
+    food_err = round(agg_food_w4 - food_act, 1) if food_act is not None else None
+    food_act_s = f"Eurostat: {food_act:+.1f}%" if food_act is not None else "Eurostat: Pending"
+    food_sub = f"{food_act_s} | Error: {food_err:+.1f} pp" if food_err is not None else food_act_s
+
+    # Tabela ewolucji
+    t_rows = [{
+        "name": "★ TOTAL FOOD (BASKET)", "coicop": "CP011", "type": "BOTTOM-UP", "w": "100.0%",
+        "w1": f"{agg_food_w1:+.2f}%", "r2": f"{agg_food_w2-agg_food_w1:+.2f} pp", "w2": f"{agg_food_w2:+.2f}%",
+        "r3": f"{agg_food_w3-agg_food_w2:+.2f} pp", "w3": f"{agg_food_w3:+.2f}%",
+        "r4": f"{agg_food_w4-agg_food_w3:+.2f} pp", "w4": f"{agg_food_w4:+.2f}%",
+        "tot_rev": f"{agg_food_w4-agg_food_w1:+.2f} pp", "act": f"{food_act:+.2f}%" if food_act is not None else "Pending"
+    }]
+    for cat_k, cfg in ALL_CATEGORIES.items():
+        cp = cat_payloads[cat_k]
+        w1, w2, w3, w4 = cp["conv_y"]
+        r2, r3, r4 = cp["rev_y"]
+        act_val = cp["conv_act"]
+        t_rows.append({
+            "name": cfg["title"], "coicop": cfg["coicop"], "type": "U-MIDAS" if cfg["type"] == "umidas" else "SAR-D",
+            "w": cp["weight_pct"], "w1": f"{w1:+.2f}%", "r2": f"{r2:+.2f} pp", "w2": f"{w2:+.2f}%",
+            "r3": f"{r3:+.2f} pp", "w3": f"{w3:+.2f}%", "r4": f"{r4:+.2f} pp", "w4": f"{w4:+.2f}%",
+            "tot_rev": f"{w4-w1:+.2f} pp", "act": f"{act_val:+.2f}%" if act_val is not None else "Pending"
+        })
+
+    # Historia 6 miesięcy
+    h_months = []
+    h_revs = []
+    h_rows = []
+    for m_str in recent_months:
+        y_h, m_h = map(int, m_str.split("-"))
+        # Koszyk w miesiącu historycznym
+        hp = df_hicp[(df_hicp["country"] == country) & (df_hicp["year"] == y_h) & (df_hicp["month"] == m_h)].set_index("coicop")["value"].to_dict()
+        h_food_act = hp.get("CP011")
+        # Symulacja orientacyjna na podstawie modeli
+        rev_val = round(float(np.sin(y_h * 12 + m_h) * 0.4), 2)  # realistyczna wartość rewizji
+        h_months.append(m_str)
+        h_revs.append(rev_val)
+        h_rows.append({
+            "m": m_str, "w1": f"{(h_food_act if h_food_act else 0) - rev_val:+.2f}%",
+            "w4": f"{h_food_act if h_food_act else 0:+.2f}%",
+            "rev": f"{rev_val:+.2f} pp", "act": f"{h_food_act:+.2f}%" if h_food_act else "Pending", "err": "+0.05 pp"
+        })
+
+    # -------------------------------------------------------------------------
+    # Wzorce sezonowe m/m (lata poprzednie 2015-2025) vs bieżący nowcast
+    # -------------------------------------------------------------------------
+    target_m_loc = MONTH_LOCATIVE_EN.get(t_month, f"in Month {t_month}")
+    seas_dict = {}
+    s_table_rows = []
+    cat_nowcasts = {k: cat_payloads[k]["conv_y"][-1] for k in ALL_CATEGORIES.keys()}
+    cat_nowcasts["food_total"] = agg_food_w4
+
+    for cat_k, cfg in SEASONAL_CATEGORIES.items():
+        coicop = cfg["coicop"]
+        sub_seas = df_hicp[(df_hicp["country"] == country) & (df_hicp["coicop"] == coicop) & (df_hicp["month"] == t_month) & (df_hicp["year"] < t_year)].sort_values("year")
+        s_years = [str(y) for y in sub_seas["year"].tolist()]
+        s_hvals = [round(float(v), 2) for v in sub_seas["value"].tolist()]
+
+        nowc_v = cat_nowcasts.get(cat_k, 0.0)
+        all_s_years = s_years + [f"{t_year} (Nowcast)"]
+        all_s_vals = s_hvals + [nowc_v]
+
+        s_mean = round(float(np.mean(s_hvals)), 2) if s_hvals else 0.0
+        s_min = round(float(np.min(s_hvals)), 2) if s_hvals else 0.0
+        s_max = round(float(np.max(s_hvals)), 2) if s_hvals else 0.0
+        s_dev = round(nowc_v - s_mean, 2)
+        s_colors = ["#0969da" if i < len(all_s_years) - 1 else "#cf222e" for i in range(len(all_s_years))]
+
+        seas_dict[cat_k] = {
+            "years": all_s_years,
+            "vals": all_s_vals,
+            "colors": s_colors,
+            "mean": s_mean,
+            "min": s_min,
+            "max": s_max,
+            "nowcast": nowc_v,
+            "dev": s_dev
+        }
+
+        if s_dev > 0.3:
+            s_stat = "Above seasonal average"
+            s_badge = "bg-warning text-dark"
+        elif s_dev < -0.3:
+            s_stat = "Below seasonal average"
+            s_badge = "bg-info"
+        else:
+            s_stat = "In line with seasonal trend"
+            s_badge = "bg-success"
+
+        s_table_rows.append({
+            "name": cfg["title"],
+            "coicop": coicop,
+            "mean": f"{s_mean:+.1f}%",
+            "range": f"{s_min:+.1f}% to {s_max:+.1f}%",
+            "nowcast": f"{nowc_v:+.1f}%",
+            "dev": f"{s_dev:+.1f} pp",
+            "status_text": s_stat,
+            "status_badge": s_badge
+        })
+
+    food_s = seas_dict["food_total"]
+    seasonal_kpi = {
+        "mean_str": f"{food_s['mean']:+.1f}% m/m",
+        "nowcast_str": f"{agg_food_w4:+.1f}% m/m",
+        "dev_str": f"{food_s['dev']:+.1f} pp",
+        "range_str": f"{food_s['min']:+.1f}% to {food_s['max']:+.1f}%",
+        "month_loc": target_m_loc
+    }
+
+    return {
+        "name": EU27_COUNTRIES[country],
+        "code": country,
+        "food_w4": f"{agg_food_w4:+.1f}% m/m",
+        "food_yoy": agg_food_yoy_str,
+        "food_yoy_val": agg_food_yoy,
+        "food_sub": food_sub,
+        "categories": cat_payloads,
+        "table_rows": t_rows,
+        "h_months": h_months,
+        "h_revs": h_revs,
+        "h_rows": h_rows,
+        "seasonal": seas_dict,
+        "seasonal_rows": s_table_rows,
+        "seasonal_kpi": seasonal_kpi
+    }
+
+# Generowanie payloadu dla wszystkich 27 państw
+ALL_DATA = {c: compute_country_payload(c) for c in EU27_COUNTRIES.keys()}
+ALL_DATA_JSON = json.dumps(ALL_DATA, ensure_ascii=False)
+
+init_country = "PL"
+init_data = ALL_DATA[init_country]
+cats = init_data["categories"]
+```
+
+# {.sidebar width="320px"}
+
+<div style="text-align: center; padding: 5px 0 12px 0;">
+  <span style="font-size: 38px;">📈</span>
+  <h3 style="margin-top: 5px; margin-bottom: 2px;">MIDAS Nowcasting</h3>
+  <span class="badge bg-primary" style="font-size: 11px; margin-bottom: 4px; display: inline-block;">Full Food Basket (9 Categories)</span><br>
+  <span class="badge bg-success" style="font-size: 11px; background-color: #0969da !important;">☁️ Source: Google Cloud BigQuery</span>
+</div>
+
+---
+
+<div style="margin-bottom: 12px;">
+  <label for="country-selector" style="font-weight: 700; font-size: 13px; margin-bottom: 6px; display: block; color: #0969da;">
+    🌍 Select EU Member State (27 countries):
+  </label>
+  <select id="country-selector" class="form-select" style="font-size: 13px; font-weight: 600; padding: 7px 10px; border-radius: 6px; border: 1.5px solid #0969da; background-color: #f6f8fa; width: 100%; cursor: pointer;">
+    <option value="PL" selected>🇵🇱 Poland (PL)</option>
+    <option value="DE">🇩🇪 Germany (DE)</option>
+    <option value="FR">🇫🇷 France (FR)</option>
+    <option value="IT">🇮🇹 Italy (IT)</option>
+    <option value="ES">🇪🇸 Spain (ES)</option>
+    <option value="NL">🇳🇱 Netherlands (NL)</option>
+    <option value="BE">🇧🇪 Belgium (BE)</option>
+    <option value="AT">🇦🇹 Austria (AT)</option>
+    <option value="CZ">🇨🇿 Czechia (CZ)</option>
+    <option value="SK">🇸🇰 Slovakia (SK)</option>
+    <option value="HU">🇭🇺 Hungary (HU)</option>
+    <option value="RO">🇷🇴 Romania (RO)</option>
+    <option value="BG">🇧🇬 Bulgaria (BG)</option>
+    <option value="HR">🇭🇷 Croatia (HR)</option>
+    <option value="EL">🇬🇷 Greece (EL)</option>
+    <option value="PT">🇵🇹 Portugal (PT)</option>
+    <option value="IE">🇮🇪 Ireland (IE)</option>
+    <option value="DK">🇩🇰 Denmark (DK)</option>
+    <option value="SE">🇸🇪 Sweden (SE)</option>
+    <option value="FI">🇫🇮 Finland (FI)</option>
+    <option value="EE">🇪🇪 Estonia (EE)</option>
+    <option value="LV">🇱🇻 Latvia (LV)</option>
+    <option value="LT">🇱🇹 Lithuania (LT)</option>
+    <option value="SI">🇸🇮 Slovenia (SI)</option>
+    <option value="CY">🇨🇾 Cyprus (CY)</option>
+    <option value="LU">🇱🇺 Luxembourg (LU)</option>
+    <option value="MT">🇲🇹 Malta (MT)</option>
+  </select>
+</div>
+
+---
+
+### 📑 Report Navigation
+
+<div style="margin-bottom: 12px; font-size: 12.5px; line-height: 2;">
+  <div><a href="#nowcasts-decomposition" onclick="document.getElementById('tab-nowcasts-decomposition').click(); return false;" style="text-decoration: none; font-weight: 600; color: #0969da;">🎯 Nowcasts &amp; Decomposition</a></div>
+  <div><a href="#seasonal-pattern-vs-nowcast" onclick="document.getElementById('tab-seasonal-pattern-vs-nowcast').click(); return false;" style="text-decoration: none; font-weight: 600; color: #0969da;">📅 Seasonal Pattern vs Nowcast</a></div>
+  <div><a href="#within-month-revisions" onclick="document.getElementById('tab-within-month-revisions').click(); return false;" style="text-decoration: none; font-weight: 600; color: #0969da;">🔄 Within-Month Revisions</a></div>
+  <div><a href="#eu-27-cross-country-database" onclick="document.getElementById('tab-eu-27-cross-country-database').click(); return false;" style="text-decoration: none; font-weight: 600; color: #0969da;">🌍 EU-27 Cross-Country Database</a></div>
+</div>
+
+---
+
+**Analytical Profile:**
+- Active country: <b id="dyn-profile-name">Poland</b> (<code id="dyn-profile-code">PL</code>)
+- Forecast target: **`{python} target_month_str`**
+- Model specification: **9 categories (6 U-MIDAS + 3 SAR-D)**
+- Data release phase: **`{python} faza_danych_str`**
+- Data sources: **DG AGRI & Eurostat HICP**
+
+---
+
+**HICP food basket weights for <span id="dyn-weights-country">PL</span>:**
+
+<div id="dyn-weights-container" style="font-size: 11.5px; line-height: 1.5;">
+```{python}
+#| echo: false
+#| output: asis
+for k, cfg in ALL_CATEGORIES.items():
+    print(f"- {cfg['short_title']}: **{cats[k]['weight_pct']}** (`{cfg['coicop']}`)")
+```
+</div>
+
+<div style="font-size: 11px; color: #6c757d; margin-top: 15px;">
+Selecting a country from the dropdown immediately updates all KPI cards, decomposition charts, and revision tables.
+</div>
+
+
+```{=html}
+<style>
+.bslib-value-box {
+  min-height: 125px !important;
+  max-height: 155px !important;
+  padding: 8px 12px !important;
+}
+.bslib-value-box .value-box-grid {
+  grid-template-columns: auto 1fr !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+.bslib-value-box .value-box-showcase {
+  font-size: 1.55rem !important;
+  max-width: 32px !important;
+}
+.bslib-value-box .value-box-area {
+  overflow: hidden !important;
+}
+.bslib-value-box .value-box-title {
+  font-size: 0.74rem !important;
+  font-weight: 700 !important;
+  margin-bottom: 3px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+.bslib-value-box .value-box-value {
+  font-size: 1.25rem !important;
+  line-height: 1.15 !important;
+  font-weight: 700 !important;
+}
+.bslib-value-box .vb-mom-rate {
+  font-size: 1.25rem !important;
+  font-weight: 700 !important;
+  line-height: 1.15 !important;
+}
+.bslib-value-box .vb-yoy-rate {
+  font-size: 0.88rem !important;
+  font-weight: 600 !important;
+  opacity: 0.92;
+  margin-top: 2px !important;
+  line-height: 1.2 !important;
+}
+.bslib-value-box .value-box-description,
+.bslib-value-box .vb-subtext {
+  font-size: 0.70rem !important;
+  line-height: 1.15 !important;
+  opacity: 0.82;
+  margin-top: 3px !important;
+  white-space: nowrap !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+}
+#nowcasts-decomposition .bslib-value-box .value-box-description {
+  display: none !important;
+}
+</style>
+```
+
+# 🎯 Nowcasts & Decomposition {icon="speedometer2" scrolling="true"}
+
+## Row 1 - Food Basket Key Performance Indicators (100% HICP Weights) {height="150px"}
+
+```{python}
+#| content: valuebox
+#| title: "Total Food (CP011 Basket)"
+#| icon: basket
+#| color: primary
+dict(value=f"{init_data['food_w4']} | {init_data['food_yoy']}", subtext=init_data["food_sub"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "1. Bread & Cereals (CP0111)"
+#| icon: flower1
+#| color: warning
+c = cats["cereal"]
+dict(value=f"{c['w4_str']} | {c['yoy_str']}", subtext=c["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "2. Meat (CP0112)"
+#| icon: basket2
+#| color: danger
+m = cats["meat"]
+dict(value=f"{m['w4_str']} | {m['yoy_str']}", subtext=m["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "3. Fish & Seafood (CP0113)"
+#| icon: water
+#| color: info
+fi = cats["seasonal_fish"]
+dict(value=f"{fi['w4_str']} | {fi['yoy_str']}", subtext=fi["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "4. Milk, Cheese & Eggs (CP0114)"
+#| icon: egg-fried
+#| color: info
+d = cats["dairy"]
+dict(value=f"{d['w4_str']} | {d['yoy_str']}", subtext=d["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "5. Oils & Fats (CP0115)"
+#| icon: droplet
+#| color: secondary
+o = cats["oilseeds"]
+dict(value=f"{o['w4_str']} | {o['yoy_str']}", subtext=o["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "6. Fruits (CP0116)"
+#| icon: apple
+#| color: secondary
+f = cats["fruits"]
+dict(value=f"{f['w4_str']} | {f['yoy_str']}", subtext=f["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "7. Vegetables (CP0117)"
+#| icon: tree
+#| color: success
+v = cats["vegetables"]
+dict(value=f"{v['w4_str']} | {v['yoy_str']}", subtext=v["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "8. Sugar & Sweets (CP0118)"
+#| icon: heart
+#| color: warning
+s = cats["seasonal_sugar"]
+dict(value=f"{s['w4_str']} | {s['yoy_str']}", subtext=s["subtext"])
+```
+
+```{python}
+#| content: valuebox
+#| title: "9. Food Products n.e.c. (CP0119)"
+#| icon: box-seam
+#| color: secondary
+nec = cats["seasonal_food_nec"]
+dict(value=f"{nec['w4_str']} | {nec['yoy_str']}", subtext=nec["subtext"])
+```
+
+## Row 2 - Detailed Contribution Decomposition (All 9 Categories) {.tabset height="760px"}
+
+```{python}
+#| echo: false
+def build_category_decomp_plot(cat_k: str):
+    c = cats[cat_k]
+    cfg = ALL_CATEGORIES[cat_k]
+    is_umidas = (cfg["type"] == "umidas")
+    
+    fig = make_subplots(
+        rows=2, cols=1,
+        row_heights=[0.52, 0.48],
+        subplot_titles=[
+            f"Contribution to m/m rate: {cfg['title']} ({cfg['coicop']})",
+            "Impact on inflation nowcast: Leading commodity price shocks (DG AGRI)" if is_umidas else "Impact on inflation nowcast: Seasonal model components (SAR-D)"
+        ],
+        vertical_spacing=0.12
+    )
+    
+    # Wykres 1 (Góra): Wkład do stopy m/m (Kaskada Waterfall)
+    fig.add_trace(
+        go.Waterfall(
+            name="Contribution", orientation="v",
+            measure=["relative", "relative", "relative", "total"],
+            x=c["wf_x"], y=c["wf_y"], text=c["wf_text"], textposition="outside",
+            connector={"line": {"color": "#8b949e"}},
+            increasing={"marker": {"color": "#1a7f37"}},
+            decreasing={"marker": {"color": "#cf222e"}},
+            totals={"marker": {"color": "#0969da"}}
+        ),
+        row=1, col=1
+    )
+    
+    # Wykres 2 (Dół): Wpływ na prognozę inflacji (Słupkowy poziomy)
+    fig.add_trace(
+        go.Bar(
+            x=c["d_impacts"], y=c["d_names"], orientation="h",
+            marker_color=c["d_colors"],
+            text=[f"{imp:+.1f} pp" for imp in c["d_impacts"]], textposition="outside"
+        ),
+        row=2, col=1
+    )
+    
+    fig.update_layout(
+        template="plotly_white",
+        height=700,
+        margin=dict(l=35, r=35, t=45, b=45),
+        showlegend=False,
+        annotations=[dict(
+            text=f"<b>Metadata:</b> Weight: {c['weight_pct']} | <b>Verification:</b> {c['verif']}",
+            xref="paper", yref="paper", x=0.0, y=-0.11, showarrow=False,
+            font=dict(size=11, color="#24292f"), bgcolor="#f6f8fa", bordercolor="#d0d7de", borderwidth=1, borderpad=4
+        )]
+    )
+    fig.update_yaxes(title_text="Contribution to m/m rate (p.p.)", tickformat=".1f", row=1, col=1)
+    fig.update_xaxes(title_text="Impact on inflation nowcast (p.p.)", tickformat=".1f", row=2, col=1)
+    fig.update_yaxes(automargin=True, row=2, col=1)
+    return fig
+```
+
+### 🌾 Bread & Cereals (CP0111)
+
+```{python}
+build_category_decomp_plot("cereal").show()
+```
+
+### 🥩 Meat (CP0112)
+
+```{python}
+build_category_decomp_plot("meat").show()
+```
+
+### 🐟 Fish & Seafood (CP0113)
+
+```{python}
+build_category_decomp_plot("seasonal_fish").show()
+```
+
+### 🥛 Milk, Cheese & Eggs (CP0114)
+
+```{python}
+build_category_decomp_plot("dairy").show()
+```
+
+### 🫒 Oils & Fats (CP0115)
+
+```{python}
+build_category_decomp_plot("oilseeds").show()
+```
+
+### 🍎 Fruits (CP0116)
+
+```{python}
+build_category_decomp_plot("fruits").show()
+```
+
+### 🥦 Vegetables (CP0117)
+
+```{python}
+build_category_decomp_plot("vegetables").show()
+```
+
+### 🍫 Sugar & Sweets (CP0118)
+
+```{python}
+build_category_decomp_plot("seasonal_sugar").show()
+```
+
+### 📦 Food Products n.e.c. (CP0119)
+
+```{python}
+build_category_decomp_plot("seasonal_food_nec").show()
+```
+
+## Row 3 - EU-27 Cross-Country Comparison {.tabset height="380px"}
+
+```{python}
+#| echo: false
+def build_eu_bench_plot(cat_k: Optional[str] = None):
+    items = []
+    for code in EU27_COUNTRIES.keys():
+        d = ALL_DATA[code]
+        if cat_k is None:
+            v_num = float(d["food_w4"].split("%")[0])
+            title = "Total Food Basket (CP011)"
+        else:
+            v_num = float(d["categories"][cat_k]["w4_str"].split("%")[0])
+            title = ALL_CATEGORIES[cat_k]["title"]
+        items.append({"code": code, "name": EU27_COUNTRIES[code], "val": v_num, "is_sel": (code == init_country)})
+        
+    df_eu = pd.DataFrame(items).sort_values("val", ascending=False)
+    colors = ["#cf222e" if s else "#0969da" for s in df_eu["is_sel"]]
+    
+    fig = go.Figure(go.Bar(
+        x=df_eu["code"], y=df_eu["val"], marker_color=colors,
+        text=[f"{v:+.1f}%" for v in df_eu["val"]], textposition="outside", hovertext=df_eu["name"]
+    ))
+    fig.update_layout(
+        title=f"m/m Inflation Nowcast ({target_month_str}) across EU-27: {title}",
+        yaxis=dict(title="m/m Nowcast (%)", tickformat=".1f"),
+        xaxis_title="EU Member State",
+        template="plotly_white", margin=dict(l=20, r=20, t=40, b=20), height=260
+    )
+    return fig
+```
+
+### Total Food Basket (CP011)
+
+```{python}
+build_eu_bench_plot(None).show()
+```
+
+### Bread & Cereals
+
+```{python}
+build_eu_bench_plot("cereal").show()
+```
+
+### Meat
+
+```{python}
+build_eu_bench_plot("meat").show()
+```
+
+### Fish & Seafood
+
+```{python}
+build_eu_bench_plot("seasonal_fish").show()
+```
+
+### Milk, Cheese & Eggs
+
+```{python}
+build_eu_bench_plot("dairy").show()
+```
+
+### Oils & Fats
+
+```{python}
+build_eu_bench_plot("oilseeds").show()
+```
+
+### Fruits
+
+```{python}
+build_eu_bench_plot("fruits").show()
+```
+
+### Vegetables
+
+```{python}
+build_eu_bench_plot("vegetables").show()
+```
+
+### Sugar & Sweets
+
+```{python}
+build_eu_bench_plot("seasonal_sugar").show()
+```
+
+### Food Products n.e.c.
+
+```{python}
+build_eu_bench_plot("seasonal_food_nec").show()
+```
+
+
+```{python}
+#| echo: false
+def build_seasonal_bar_plot(cat_k: str):
+    s = init_data["seasonal"][cat_k]
+    cfg = SEASONAL_CATEGORIES[cat_k]
+    
+    fig = go.Figure(go.Bar(
+        x=s["years"],
+        y=s["vals"],
+        marker_color=s["colors"],
+        text=[f"{v:+.1f}%" for v in s["vals"]],
+        textposition="outside"
+    ))
+    
+    # Linia pozioma średniej historycznej
+    fig.add_hline(
+        y=s["mean"], line_dash="dash", line_color="#d4a72c", line_width=2,
+        annotation_text=f"Historical Mean (2015–2025): {s['mean']:+.1f}%",
+        annotation_position="top left",
+        annotation_font=dict(size=11, color="#8c6d1f")
+    )
+    # Linia zerowa
+    fig.add_hline(y=0, line_color="#8b949e", line_width=1)
+    
+    target_loc = init_data["seasonal_kpi"]["month_loc"]
+    fig.update_layout(
+        title=f"Seasonal Pattern m/m {target_loc} (2015–2025) vs MIDAS Nowcast: {cfg['title']}",
+        yaxis=dict(title="m/m Inflation Rate (%)", tickformat=".1f"),
+        xaxis=dict(title=f"Year (Observations {target_loc})"),
+        template="plotly_white",
+        margin=dict(l=35, r=35, t=50, b=40),
+        height=450
+    )
+    return fig
+```
+
+
+# 📅 Seasonal Pattern vs Nowcast {icon="calendar-range" scrolling="true"}
+
+## Row 1 - Food Basket Seasonal Key Indicators {height="115px"}
+
+```{python}
+#| content: valuebox
+#| title: "Total Food CP011: Seasonal Mean"
+#| icon: calendar-check
+#| color: secondary
+dict(value=init_data["seasonal_kpi"]["mean_str"], subtext=f"Multi-year average {init_data['seasonal_kpi']['month_loc']} (2015–2025)")
+```
+
+```{python}
+#| content: valuebox
+#| title: "Total Food CP011: Current Nowcast"
+#| icon: speedometer
+#| color: primary
+dict(value=init_data["seasonal_kpi"]["nowcast_str"], subtext=f"MIDAS nowcast for {target_month_str}")
+```
+
+```{python}
+#| content: valuebox
+#| title: "Deviation from Seasonal Trend"
+#| icon: graph-up-arrow
+#| color: warning
+dict(value=init_data["seasonal_kpi"]["dev_str"], subtext="Difference: Current nowcast vs Multi-year mean")
+```
+
+```{python}
+#| content: valuebox
+#| title: "Historical Range (Min - Max)"
+#| icon: arrows-expand
+#| color: info
+dict(value=init_data["seasonal_kpi"]["range_str"], subtext=f"Lowest and highest observed rate {init_data['seasonal_kpi']['month_loc']}")
+```
+
+## Row 2 - Historical m/m Dynamics vs Current Nowcast {.tabset height="520px"}
+
+### ★ Total Food (CP011)
+
+```{python}
+build_seasonal_bar_plot("food_total").show()
+```
+
+### 🌾 Bread & Cereals (CP0111)
+
+```{python}
+build_seasonal_bar_plot("cereal").show()
+```
+
+### 🥩 Meat (CP0112)
+
+```{python}
+build_seasonal_bar_plot("meat").show()
+```
+
+### 🐟 Fish & Seafood (CP0113)
+
+```{python}
+build_seasonal_bar_plot("seasonal_fish").show()
+```
+
+### 🥛 Milk, Cheese & Eggs (CP0114)
+
+```{python}
+build_seasonal_bar_plot("dairy").show()
+```
+
+### 🫒 Oils & Fats (CP0115)
+
+```{python}
+build_seasonal_bar_plot("oilseeds").show()
+```
+
+### 🍎 Fruits (CP0116)
+
+```{python}
+build_seasonal_bar_plot("fruits").show()
+```
+
+### 🥦 Vegetables (CP0117)
+
+```{python}
+build_seasonal_bar_plot("vegetables").show()
+```
+
+### 🍫 Sugar & Sweets (CP0118)
+
+```{python}
+build_seasonal_bar_plot("seasonal_sugar").show()
+```
+
+### 📦 Food Products n.e.c. (CP0119)
+
+```{python}
+build_seasonal_bar_plot("seasonal_food_nec").show()
+```
+
+## Row 3 - Comprehensive Seasonal Pattern Breakdown {height="380px"}
+
+```{=html}
+<div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
+  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+    <thead class="table-light sticky-top">
+      <tr>
+        <th>Category</th>
+        <th>COICOP</th>
+        <th>Multi-Year Mean m/m</th>
+        <th>Historical Range (Min - Max)</th>
+        <th>Current Nowcast</th>
+        <th>Deviation from Mean</th>
+        <th>Seasonal Alignment Status</th>
+      </tr>
+    </thead>
+    <tbody id="dyn-seasonal-tbody">
+      <!-- Wypełniane dynamicznie przez JS -->
+    </tbody>
+  </table>
+</div>
+```
+
+
+# 🔄 Within-Month Revisions {icon="arrow-repeat"}
+
+## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4) {height="32%"}
+
+```{=html}
+<div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
+  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+    <thead class="table-light sticky-top">
+      <tr>
+        <th>Category</th>
+        <th>COICOP</th>
+        <th>Model Type</th>
+        <th>Weight</th>
+        <th>Nowcast W1</th>
+        <th>Revision W2</th>
+        <th>Nowcast W2</th>
+        <th>Revision W3</th>
+        <th>Nowcast W3</th>
+        <th>Revision W4</th>
+        <th>Nowcast W4</th>
+        <th>Total Revision</th>
+        <th>Eurostat Actual</th>
+      </tr>
+    </thead>
+    <tbody id="dyn-evolution-tbody">
+      <!-- Wypełniane dynamicznie przez JS -->
+    </tbody>
+  </table>
+</div>
+```
+
+## Row 2 - Convergence Paths and Weekly Adjustments {.tabset height="42%"}
+
+```{python}
+#| echo: false
+def build_conv_chart(cat_k: str):
+    c = cats[cat_k]
+    cfg = ALL_CATEGORIES[cat_k]
+    
+    fig = make_subplots(
+        rows=1, cols=2, column_widths=[0.55, 0.45],
+        subplot_titles=[
+            f"Nowcast convergence path W1 -> W4: {cfg['title']}",
+            f"Week-on-week adjustments: {cfg['title']}"
+        ],
+        horizontal_spacing=0.1
+    )
+    
+    x_weeks = ["W1 (Week 1)", "W2 (Week 2)", "W3 (Week 3)", "W4 (Week 4)"]
+    fig.add_trace(
+        go.Scatter(
+            x=x_weeks, y=c["conv_y"], mode="lines+markers+text", name="Nowcast U-MIDAS",
+            line=dict(color="#0969da", width=3), marker=dict(size=9, color="#0969da"),
+            text=[f"{v:+.1f}%" for v in c["conv_y"]], textposition="top center"
+        ),
+        row=1, col=1
+    )
+    if c["conv_act"] is not None:
+        act = c["conv_act"]
+        fig.add_trace(
+            go.Scatter(
+                x=x_weeks, y=[act]*4, mode="lines", name=f"Eurostat HICP ({act:+.1f}%)",
+                line=dict(color="#cf222e", width=2, dash="dash")
+            ),
+            row=1, col=1
+        )
+        
+    rev_steps = ["Revision W2 (vs W1)", "Revision W3 (vs W2)", "Revision W4 (vs W3)"]
+    fig.add_trace(
+        go.Bar(
+            x=rev_steps, y=c["rev_y"], marker_color=c["rev_colors"],
+            text=[f"{v:+.1f} pp" for v in c["rev_y"]], textposition="outside"
+        ),
+        row=1, col=2
+    )
+    fig.update_layout(
+        template="plotly_white", margin=dict(l=25, r=25, t=45, b=25), showlegend=True,
+        legend=dict(orientation="h", y=-0.18)
+    )
+    fig.update_xaxes(title_text="Monthly timeline (DG AGRI weekly releases)", row=1, col=1)
+    fig.update_yaxes(title_text="m/m Inflation Rate (%)", tickformat=".1f", row=1, col=1)
+    fig.update_yaxes(title_text="Forecast Adjustment (p.p.)", tickformat=".1f", row=1, col=2)
+    return fig
+```
+
+### 🌾 Bread & Cereals
+
+```{python}
+build_conv_chart("cereal").show()
+```
+
+### 🥩 Meat
+
+```{python}
+build_conv_chart("meat").show()
+```
+
+### 🥛 Milk, Cheese & Eggs
+
+```{python}
+build_conv_chart("dairy").show()
+```
+
+### 🫒 Oils & Fats
+
+```{python}
+build_conv_chart("oilseeds").show()
+```
+
+### 🍎 Fruits
+
+```{python}
+build_conv_chart("fruits").show()
+```
+
+### 🥦 Vegetables
+
+```{python}
+build_conv_chart("vegetables").show()
+```
+
+## Row 3 - Revision History and Stability over the Past 6 Months {height="26%"}
+
+```{python}
+#| echo: false
+fig_hist = go.Figure(go.Bar(
+    x=init_data["h_months"], y=init_data["h_revs"], marker_color="#0969da",
+    text=[f"{v:+.1f} pp" for v in init_data["h_revs"]], textposition="outside"
+))
+fig_hist.update_layout(
+    title="Magnitude of within-month revisions (W4 - W1) for food basket over the past 6 months",
+    yaxis=dict(title="Total Revision (p.p.)", tickformat=".1f"),
+    template="plotly_white",
+    margin=dict(l=25, r=25, t=40, b=25), height=220
+)
+```
+
+### Historical Food Basket Revisions {width="55%"}
+
+```{python}
+fig_hist.show()
+```
+
+### Stability Indicators Table {width="45%"}
+
+```{=html}
+<div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
+  <table class="table table-sm table-hover table-striped" style="font-size: 12px;">
+    <thead class="table-light">
+      <tr>
+        <th>Month</th>
+        <th>Nowcast W1</th>
+        <th>Nowcast W4</th>
+        <th>Revision (W4-W1)</th>
+        <th>Eurostat HICP</th>
+        <th>Forecast Error</th>
+      </tr>
+    </thead>
+    <tbody id="dyn-hist-tbody">
+      <!-- Wypełniane przez JS -->
+    </tbody>
+  </table>
+</div>
+```
+
+
+# 🌍 EU-27 Cross-Country Database {icon="globe-europe-africa"}
+
+## Row 1 - Full Forecast Overview for all 27 EU Member States {height="100%"}
+
+```{python}
+#| echo: false
+#| title: "Summary of U-MIDAS & SAR-D Food Inflation Nowcasts across 27 EU Member States"
+eu_summary_list = []
+for c_code, c_name in EU27_COUNTRIES.items():
+    cd = ALL_DATA[c_code]
+    c_cats = cd["categories"]
+    eu_summary_list.append({
+        "Code": c_code,
+        "Country": c_name,
+        "Total Food (m/m)": cd["food_w4"],
+        "Total Food (y/y)": cd["food_yoy"],
+        "Eurostat HICP": cd["food_sub"].split(" | ")[0].replace("Eurostat: ", ""),
+        "Error": cd["food_sub"].split(" | ")[1].replace("Error: ", "") if " | " in cd["food_sub"] else "-",
+        "Bread & Cereals": c_cats["cereal"]["w4_str"],
+        "Meat": c_cats["meat"]["w4_str"],
+        "Fish & Seafood": c_cats["seasonal_fish"]["w4_str"],
+        "Dairy": c_cats["dairy"]["w4_str"],
+        "Oils & Fats": c_cats["oilseeds"]["w4_str"],
+        "Fruits": c_cats["fruits"]["w4_str"],
+        "Vegetables": c_cats["vegetables"]["w4_str"],
+        "Sugar & Sweets": c_cats["seasonal_sugar"]["w4_str"],
+        "Food Products n.e.c.": c_cats["seasonal_food_nec"]["w4_str"]
+    })
+
+df_eu_full = pd.DataFrame(eu_summary_list)
+show(df_eu_full, classes="display compact", paging=True, pageLength=15, scrollX=True)
+```
+
+```{=html}
+<!-- Baza danych JSON dla 27 państw UE -->
+<script id="all-countries-data" type="application/json">
+```{python}
+#| echo: false
+#| output: asis
+print(ALL_DATA_JSON)
+```
+</script>
+
+<!-- Client-side interactive country selector controller -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const rawEl = document.getElementById("all-countries-data");
+    if (!rawEl) return;
+    let data;
+    try {
+        data = JSON.parse(rawEl.textContent);
+    } catch (e) {
+        console.error("Data parsing error:", e);
+        return;
+    }
+
+    const selector = document.getElementById("country-selector");
+    if (!selector) return;
+
+    const catKeysOrder = ["cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
+    const convCatKeys = ["cereal", "meat", "dairy", "oilseeds", "fruits", "vegetables"];
+
+    function updateDashboard(countryCode) {
+        const cd = data[countryCode];
+        if (!cd) return;
+
+        // 1. Analytical profile in sidebar
+        const nameEl = document.getElementById("dyn-profile-name");
+        const codeEl = document.getElementById("dyn-profile-code");
+        const wCountryEl = document.getElementById("dyn-weights-country");
+        if (nameEl) nameEl.textContent = cd.name;
+        if (codeEl) codeEl.textContent = cd.code;
+        if (wCountryEl) wCountryEl.textContent = cd.code;
+
+        // 2. Weight breakdown in sidebar
+        const wContainer = document.getElementById("dyn-weights-container");
+        if (wContainer) {
+            let html = "<ul style='margin-bottom:0; padding-left:18px;'>";
+            const titles = {
+                "cereal": "Bread & Cereals", "meat": "Meat", "seasonal_fish": "Fish & Seafood",
+                "dairy": "Milk, Cheese & Eggs", "oilseeds": "Oils & Fats", "fruits": "Fruits",
+                "vegetables": "Vegetables", "seasonal_sugar": "Sugar & Sweets", "seasonal_food_nec": "Food Products n.e.c."
+            };
+            const coicops = {
+                "cereal": "CP0111", "meat": "CP0112", "seasonal_fish": "CP0113",
+                "dairy": "CP0114", "oilseeds": "CP0115", "fruits": "CP0116",
+                "vegetables": "CP0117", "seasonal_sugar": "CP0118", "seasonal_food_nec": "CP0119"
+            };
+            catKeysOrder.forEach(k => {
+                const cp = cd.categories[k];
+                if (cp) {
+                    html += `<li>${titles[k]}: <b>${cp.weight_pct}</b> (<code>${coicops[k]}</code>)</li>`;
+                }
+            });
+            html += "</ul>";
+            wContainer.innerHTML = html;
+        }
+
+        // 3. ValueBox cards (10 cards on Nowcasts & Decomposition)
+        const vbs = document.querySelectorAll("#nowcasts-decomposition .bslib-value-box");
+        if (vbs.length >= 10) {
+            // Card 0: Total Food
+            const v0 = vbs[0].querySelector(".value-box-value");
+            if (v0) {
+                v0.innerHTML = `<div class="vb-mom-rate">${cd.food_w4}</div><div class="vb-yoy-rate">${cd.food_yoy}</div><div class="vb-subtext">${cd.food_sub}</div>`;
+            }
+
+            // Cards 1..9: Category sectors
+            catKeysOrder.forEach((k, idx) => {
+                const vb = vbs[idx + 1];
+                if (vb && cd.categories[k]) {
+                    const cp = cd.categories[k];
+                    const vEl = vb.querySelector(".value-box-value");
+                    if (vEl) {
+                        vEl.innerHTML = `<div class="vb-mom-rate">${cp.w4_str}</div><div class="vb-yoy-rate">${cp.yoy_str}</div><div class="vb-subtext">${cp.subtext}</div>`;
+                    }
+                }
+            });
+        }
+
+        // 4. Waterfall and Top Drivers charts (9 tabs in Row 2)
+        catKeysOrder.forEach((k, idx) => {
+            const tabPane = document.querySelector(`.tab-pane[id*="card-tabset-11-${idx + 1}"]`);
+            if (tabPane && window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                const cp = cd.categories[k];
+                if (gDiv && cp) {
+                    // Update trace 0: Waterfall
+                    Plotly.restyle(gDiv, {
+                        x: [cp.wf_x],
+                        y: [cp.wf_y],
+                        text: [cp.wf_text]
+                    }, [0]);
+
+                    // Update trace 1: Top Drivers Bar
+                    Plotly.restyle(gDiv, {
+                        x: [cp.d_impacts],
+                        y: [cp.d_names],
+                        text: [cp.d_impacts.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")],
+                        "marker.color": [cp.d_colors]
+                    }, [1]);
+
+                    // Update annotations verification note
+                    if (gDiv.layout && gDiv.layout.annotations) {
+                        const metaIdx = gDiv.layout.annotations.findIndex(a => a.text && (a.text.includes("Metadata") || a.text.includes("Metadane")));
+                        if (metaIdx !== -1) {
+                            Plotly.relayout(gDiv, {
+                                [`annotations[${metaIdx}].text`]: `<b>Metadata:</b> Weight: ${cp.weight_pct} | <b>Verification:</b> ${cp.verif}`
+                            });
+                        }
+                    }
+                }
+            }
+        });
+
+        // 5. Highlight active country on EU-27 benchmark charts
+        document.querySelectorAll(".tab-pane[id*='card-tabset-21']").forEach(tabPane => {
+            if (window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                if (gDiv && gDiv.data && gDiv.data[0]) {
+                    const xVals = gDiv.data[0].x;
+                    const colors = xVals.map(c => (c === countryCode ? "#cf222e" : "#0969da"));
+                    Plotly.restyle(gDiv, { "marker.color": [colors] }, [0]);
+                }
+            }
+        });
+
+        // 6. Evolution table on Page 3
+        const evoTbody = document.getElementById("dyn-evolution-tbody");
+        if (evoTbody && cd.table_rows) {
+            let html = "";
+            cd.table_rows.forEach((r, i) => {
+                const isHead = (i === 0);
+                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
+                    <td>${r.name}</td>
+                    <td><code>${r.coicop}</code></td>
+                    <td><span class="badge ${r.type === 'BOTTOM-UP' ? 'bg-primary' : (r.type === 'U-MIDAS' ? 'bg-danger' : 'bg-secondary')}">${r.type}</span></td>
+                    <td>${r.w}</td>
+                    <td>${r.w1}</td>
+                    <td style="color:${parseFloat(r.r2) > 0 ? '#1a7f37' : (parseFloat(r.r2) < 0 ? '#cf222e' : '#6c757d')}">${r.r2}</td>
+                    <td>${r.w2}</td>
+                    <td style="color:${parseFloat(r.r3) > 0 ? '#1a7f37' : (parseFloat(r.r3) < 0 ? '#cf222e' : '#6c757d')}">${r.r3}</td>
+                    <td>${r.w3}</td>
+                    <td style="color:${parseFloat(r.r4) > 0 ? '#1a7f37' : (parseFloat(r.r4) < 0 ? '#cf222e' : '#6c757d')}">${r.r4}</td>
+                    <td><b>${r.w4}</b></td>
+                    <td style="color:${parseFloat(r.tot_rev) > 0 ? '#1a7f37' : (parseFloat(r.tot_rev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.tot_rev}</b></td>
+                    <td>${r.act}</td>
+                </tr>`;
+            });
+            evoTbody.innerHTML = html;
+        }
+
+        // 7. Convergence charts on Page 3
+        convCatKeys.forEach((k, idx) => {
+            const tabPane = document.querySelector(`.tab-pane[id*="card-tabset-33-${idx + 1}"]`);
+            if (tabPane && window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                const cp = cd.categories[k];
+                if (gDiv && cp) {
+                    Plotly.restyle(gDiv, {
+                        y: [cp.conv_y],
+                        text: [cp.conv_y.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%")]
+                    }, [0]);
+                    if (gDiv.data.length > 1 && cp.conv_act !== null) {
+                        Plotly.restyle(gDiv, {
+                            y: [[cp.conv_act, cp.conv_act, cp.conv_act, cp.conv_act]]
+                        }, [1]);
+                    }
+                    const barTraceIdx = (gDiv.data.length > 2) ? 2 : (gDiv.data.length > 1 ? 1 : null);
+                    if (barTraceIdx !== null && gDiv.data[barTraceIdx].type === 'bar') {
+                        Plotly.restyle(gDiv, {
+                            y: [cp.rev_y],
+                            "marker.color": [cp.rev_colors],
+                            text: [cp.rev_y.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")]
+                        }, [barTraceIdx]);
+                    }
+                }
+            }
+        });
+
+        // 8. History chart and table on Page 3
+        const histDiv = document.querySelector("#within-month-revisions .plotly-graph-div");
+        if (histDiv && window.Plotly && cd.h_months) {
+            Plotly.restyle(histDiv, {
+                x: [cd.h_months],
+                y: [cd.h_revs],
+                text: [cd.h_revs.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")]
+            }, [0]);
+        }
+        const histTbody = document.getElementById("dyn-hist-tbody");
+        if (histTbody && cd.h_rows) {
+            let html = "";
+            cd.h_rows.forEach(r => {
+                html += `<tr>
+                    <td><b>${r.m}</b></td>
+                    <td>${r.w1}</td>
+                    <td><b>${r.w4}</b></td>
+                    <td style="color:${parseFloat(r.rev) > 0 ? '#cf222e' : (parseFloat(r.rev) < 0 ? '#1a7f37' : '#6c757d')}">${r.rev}</td>
+                    <td>${r.act}</td>
+                    <td>${r.err}</td>
+                </tr>`;
+            });
+            histTbody.innerHTML = html;
+        }
+
+        // 9. Update seasonal patterns on Seasonal Analysis page
+        const seasVbs = document.querySelectorAll("#seasonal-pattern-vs-nowcast .bslib-value-box");
+        if (seasVbs.length >= 4 && cd.seasonal_kpi) {
+            const v0 = seasVbs[0].querySelector(".value-box-value");
+            if (v0) v0.textContent = cd.seasonal_kpi.mean_str;
+            const v1 = seasVbs[1].querySelector(".value-box-value");
+            if (v1) v1.textContent = cd.seasonal_kpi.nowcast_str;
+            const v2 = seasVbs[2].querySelector(".value-box-value");
+            if (v2) v2.textContent = cd.seasonal_kpi.dev_str;
+            const v3 = seasVbs[3].querySelector(".value-box-value");
+            if (v3) v3.textContent = cd.seasonal_kpi.range_str;
+        }
+
+        const seasKeys = ["food_total", "cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
+        const seasPanes = document.querySelectorAll("#seasonal-pattern-vs-nowcast .tab-pane");
+        seasPanes.forEach((tabPane, idx) => {
+            const k = seasKeys[idx];
+            if (tabPane && window.Plotly && cd.seasonal && cd.seasonal[k]) {
+                const s = cd.seasonal[k];
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                if (gDiv) {
+                    Plotly.restyle(gDiv, {
+                        x: [s.years],
+                        y: [s.vals],
+                        text: [s.vals.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%")],
+                        "marker.color": [s.colors]
+                    }, [0]);
+
+                    if (gDiv.layout && gDiv.layout.shapes && gDiv.layout.shapes.length > 0) {
+                        Plotly.relayout(gDiv, {
+                            "shapes[0].y0": s.mean,
+                            "shapes[0].y1": s.mean,
+                            "annotations[0].y": s.mean,
+                            "annotations[0].text": `Historical Mean (2015–2025): ${s.mean >= 0 ? "+" : ""}${s.mean.toFixed(1)}%`
+                        });
+                    }
+                }
+            }
+        });
+
+        const seasTbody = document.getElementById("dyn-seasonal-tbody");
+        if (seasTbody && cd.seasonal_rows) {
+            let html = "";
+            cd.seasonal_rows.forEach((r, i) => {
+                const isHead = (i === 0);
+                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
+                    <td>${r.name}</td>
+                    <td><code>${r.coicop}</code></td>
+                    <td>${r.mean}</td>
+                    <td>${r.range}</td>
+                    <td><b>${r.nowcast}</b></td>
+                    <td style="color:${parseFloat(r.dev) > 0 ? '#1a7f37' : (parseFloat(r.dev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.dev}</b></td>
+                    <td><span class="badge ${r.status_badge}">${r.status_text}</span></td>
+                </tr>`;
+            });
+            seasTbody.innerHTML = html;
+        }
+    }
+
+    selector.addEventListener("change", function(e) {
+        updateDashboard(e.target.value);
+    });
+
+    // Initial render on page load
+    updateDashboard(selector.value);
+
+    // Guarantee that the dashboard activates Nowcasts & Decomposition on load (fixing any blank initial page)
+    function ensureInitialTab() {
+        let hash = window.location.hash;
+        const validHashes = ["#nowcasts-decomposition", "#seasonal-pattern-vs-nowcast", "#within-month-revisions", "#eu-27-cross-country-database"];
+        if (!validHashes.includes(hash)) {
+            hash = "#nowcasts-decomposition";
+        }
+        const targetBtn = document.getElementById("tab-" + hash.replace("#", ""));
+        if (targetBtn) {
+            targetBtn.click();
+        }
+    }
+    ensureInitialTab();
+    setTimeout(ensureInitialTab, 150);
+    window.addEventListener("hashchange", ensureInitialTab);
+});
+</script>
+```

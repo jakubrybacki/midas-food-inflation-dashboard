@@ -1,0 +1,8 @@
+# Ignore batch scripts
+*.bat
+
+# System and temporary files
+desktop.ini
+.quarto/
+*.pyc
+__pycache__/
