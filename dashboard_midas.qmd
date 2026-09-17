@@ -199,6 +199,147 @@ faza_danych_str = f"Week {latest_w} (W{latest_w} - {'Current nowcast' if latest_
 available_dates = df_hicp.sort_values("date", ascending=False)["date"].dt.strftime("%Y-%m").unique().tolist()
 recent_months = available_dates[:6]
 
+def compute_revisions_for_month(country: str, y: int, m: int) -> Dict[str, Any]:
+    target_ts_m = pd.Timestamp(f"{y}-{m:02d}-01")
+    py = y if m > 1 else y - 1
+    pm = m - 1 if m > 1 else 12
+
+    sub_c = df_hicp[(df_hicp["country"] == country) & (df_hicp["date"] < target_ts_m)]
+    hicp_p_m = sub_c[sub_c["date"] == sub_c["date"].max()].set_index("coicop")["value"].to_dict() if not sub_c.empty else {}
+    hicp_l12_m = df_hicp[(df_hicp["country"] == country) & (df_hicp["year"] == y - 1) & (df_hicp["month"] == m)].set_index("coicop")["value"].to_dict()
+    hicp_act_m = df_hicp[(df_hicp["country"] == country) & (df_hicp["year"] == y) & (df_hicp["month"] == m)].set_index("coicop")["value"].to_dict()
+
+    c_dlog = df_dlog[df_dlog["country"] == country]
+    sub_dlog_m = c_dlog[
+        ((c_dlog["year"] == y) & (c_dlog["month"] == m)) |
+        ((c_dlog["year"] == py) & (c_dlog["month"] == pm) & (c_dlog["week_in_month"].isin([3, 4])))
+    ]
+    f_val_m = {}
+    for _, r in sub_dlog_m.iterrows():
+        item = r["sanitized_item"]
+        w = int(r["week_in_month"])
+        y_v, m_v = int(r["year"]), int(r["month"])
+        fname = f"{item}_w{w}" if (y_v == y and m_v == m) else f"{item}_prev_w{w}"
+        f_val_m[fname] = r["dlog_price"]
+        if "_wheat" in fname:
+            f_val_m[fname.replace("_wheat", "_prev_wheat")] = r["dlog_price"]
+
+    m_sub = df_dlog[(df_dlog["year"] == y) & (df_dlog["month"] == m)]
+    max_w = int(m_sub["week_in_month"].max()) if not m_sub.empty else 4
+    if max_w > 4:
+        max_w = 4
+
+    w_df = df_weights[(df_weights["country"] == country) & (df_weights["year"] == latest_w_year)]
+    c_weights = w_df.set_index("coicop")["food_share"].to_dict()
+
+    cat_revs = {}
+    w_totals = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
+    tot_w = 0.0
+
+    for cat_k, cfg in ALL_CATEGORIES.items():
+        coicop = cfg["coicop"]
+        weight = c_weights.get(coicop, 0.0)
+        tot_w += weight
+        m_key = f"{cat_k}_{country}"
+        m_data = all_models.get(m_key, {"intercept": 0.0, "coefficients": {}, "r2": 0.0, "rmse": 0.0})
+        intercept = m_data["intercept"]
+        coefs = m_data["coefficients"]
+        act = hicp_act_m.get(coicop)
+
+        if cfg["type"] == "umidas":
+            lag_y = hicp_p_m.get(coicop, 0.0)
+            lag_contrib = coefs.get("lag_y", 0.0) * lag_y
+            w_preds = {}
+            for w_idx in [1, 2, 3, 4]:
+                pred = intercept + lag_contrib
+                for fname, coef in coefs.items():
+                    if fname == "lag_y":
+                        continue
+                    is_av = False
+                    if "_prev_" in fname:
+                        is_av = True
+                    else:
+                        for n in range(1, w_idx + 1):
+                            if fname.endswith(f"_w{n}"):
+                                is_av = True
+                                break
+                    val = f_val_m.get(fname, 0.0) if is_av else 0.0
+                    pred += coef * val
+                w_preds[w_idx] = round(float(pred), 2)
+                w_totals[w_idx] += w_preds[w_idx] * weight
+        else:
+            lag_1 = hicp_p_m.get(coicop, 0.0)
+            lag_12 = hicp_l12_m.get(coicop, 0.0)
+            c1 = coefs.get("lag_1", 0.0) * lag_1
+            c12 = coefs.get("lag_12", 0.0) * lag_12
+            d_c = coefs.get(f"m_{m}", 0.0) if m > 1 else 0.0
+            pred = round(float(intercept + c1 + c12 + d_c), 2)
+            w_preds = {1: pred, 2: pred, 3: pred, 4: pred}
+            for w_i in [1, 2, 3, 4]:
+                w_totals[w_i] += pred * weight
+
+        r2 = round(w_preds[2] - w_preds[1], 2)
+        r3 = round(w_preds[3] - w_preds[2], 2)
+        r4 = round(w_preds[4] - w_preds[3], 2)
+        tot_rev = round(w_preds[max_w] - w_preds[1], 2)
+
+        conv_y = [w_preds[1], w_preds[2], (w_preds[3] if max_w >= 3 else None), (w_preds[4] if max_w >= 4 else None)]
+        rev_y = [r2, (r3 if max_w >= 3 else None), (r4 if max_w >= 4 else None)]
+        rev_colors = ["#cf222e" if (v is not None and v > 0) else ("#1a7f37" if (v is not None and v < 0) else "#6c757d") for v in rev_y]
+
+        cat_revs[cat_k] = {
+            "w_preds": w_preds, "r2": r2, "r3": r3, "r4": r4, "tot_rev": tot_rev,
+            "conv_y": conv_y, "rev_y": rev_y, "rev_colors": rev_colors, "conv_act": act,
+            "weight_pct": f"{weight*100:.1f}%"
+        }
+
+    agg_w = {w_i: round(w_totals[w_i] / tot_w, 2) for w_i in [1, 2, 3, 4]}
+    food_act = hicp_act_m.get("CP011")
+    agg_r2 = round(agg_w[2] - agg_w[1], 2)
+    agg_r3 = round(agg_w[3] - agg_w[2], 2)
+    agg_r4 = round(agg_w[4] - agg_w[3], 2)
+    agg_tot_rev = round(agg_w[max_w] - agg_w[1], 2)
+
+    t_rows = [{
+        "name": "★ TOTAL FOOD (BASKET)", "coicop": "CP011", "type": "BOTTOM-UP", "w": "100.0%",
+        "w1": f"{agg_w[1]:+.2f}%",
+        "r2": f"{agg_r2:+.2f} pp" if max_w >= 2 else "—",
+        "w2": f"{agg_w[2]:+.2f}%" if max_w >= 2 else '<span class="badge bg-light text-muted border">Pending</span>',
+        "r3": f"{agg_r3:+.2f} pp" if max_w >= 3 else "—",
+        "w3": f"{agg_w[3]:+.2f}%" if max_w >= 3 else '<span class="badge bg-light text-muted border">Pending</span>',
+        "r4": f"{agg_r4:+.2f} pp" if max_w >= 4 else "—",
+        "w4": f"{agg_w[4]:+.2f}%" if max_w >= 4 else '<span class="badge bg-light text-muted border">Pending</span>',
+        "tot_rev": f"{agg_tot_rev:+.2f} pp" if max_w == 4 else f"{agg_tot_rev:+.2f} pp (W{max_w} so far)",
+        "act": f"{food_act:+.2f}%" if food_act is not None else '<span class="badge bg-secondary">Pending</span>'
+    }]
+
+    for cat_k, cfg in ALL_CATEGORIES.items():
+        cp = cat_revs[cat_k]
+        wp = cp["w_preds"]
+        act_v = cp["conv_act"]
+        t_rows.append({
+            "name": cfg["title"], "coicop": cfg["coicop"], "type": "U-MIDAS" if cfg["type"] == "umidas" else "SAR-D",
+            "w": cp["weight_pct"],
+            "w1": f"{wp[1]:+.2f}%",
+            "r2": f"{cp['r2']:+.2f} pp" if max_w >= 2 else "—",
+            "w2": f"{wp[2]:+.2f}%" if max_w >= 2 else '<span class="badge bg-light text-muted border">Pending</span>',
+            "r3": f"{cp['r3']:+.2f} pp" if max_w >= 3 else "—",
+            "w3": f"{wp[3]:+.2f}%" if max_w >= 3 else '<span class="badge bg-light text-muted border">Pending</span>',
+            "r4": f"{cp['r4']:+.2f} pp" if max_w >= 4 else "—",
+            "w4": f"{wp[4]:+.2f}%" if max_w >= 4 else '<span class="badge bg-light text-muted border">Pending</span>',
+            "tot_rev": f"{cp['tot_rev']:+.2f} pp" if max_w == 4 else f"{cp['tot_rev']:+.2f} pp (W{max_w} so far)",
+            "act": f"{act_v:+.2f}%" if act_v is not None else '<span class="badge bg-secondary">Pending</span>'
+        })
+
+    return {
+        "month_str": f"{y}-{m:02d}",
+        "max_w": max_w,
+        "table_rows": t_rows,
+        "categories": cat_revs,
+        "agg_w": agg_w,
+        "food_act": food_act
+    }
+
 # Funkcja wyliczająca profil danego kraju
 def compute_country_payload(country: str) -> Dict[str, Any]:
     sub_c = df_hicp[(df_hicp["country"] == country) & (df_hicp["date"] < target_ts)]
@@ -222,6 +363,8 @@ def compute_country_payload(country: str) -> Dict[str, Any]:
         y_v, m_v = int(r["year"]), int(r["month"])
         fname = f"{item}_w{w}" if (y_v == t_year and m_v == t_month) else f"{item}_prev_w{w}"
         f_val[fname] = r["dlog_price"]
+        if "_wheat" in fname:
+            f_val[fname.replace("_wheat", "_prev_wheat")] = r["dlog_price"]
 
     w_df = df_weights[(df_weights["country"] == country) & (df_weights["year"] == latest_w_year)]
     c_weights = w_df.set_index("coicop")["food_share"].to_dict()
@@ -341,6 +484,7 @@ def compute_country_payload(country: str) -> Dict[str, Any]:
         sub_t = f"Eurostat: {act:+.1f}%" if act is not None else f"Weight: {weight*100:.1f}% | R²: {m_data['r2']:.1%}"
 
         cat_payloads[cat_k] = {
+            "nowcast_val": w4,
             "w4_str": f"{w4:+.1f}% m/m",
             "yoy_str": cat_yoy_str,
             "yoy_val": cat_yoy_w4,
@@ -380,25 +524,14 @@ def compute_country_payload(country: str) -> Dict[str, Any]:
     food_act_s = f"Eurostat: {food_act:+.1f}%" if food_act is not None else "Eurostat: Pending"
     food_sub = f"{food_act_s} | Error: {food_err:+.1f} pp" if food_err is not None else food_act_s
 
-    # Tabela ewolucji
-    t_rows = [{
-        "name": "★ TOTAL FOOD (BASKET)", "coicop": "CP011", "type": "BOTTOM-UP", "w": "100.0%",
-        "w1": f"{agg_food_w1:+.2f}%", "r2": f"{agg_food_w2-agg_food_w1:+.2f} pp", "w2": f"{agg_food_w2:+.2f}%",
-        "r3": f"{agg_food_w3-agg_food_w2:+.2f} pp", "w3": f"{agg_food_w3:+.2f}%",
-        "r4": f"{agg_food_w4-agg_food_w3:+.2f} pp", "w4": f"{agg_food_w4:+.2f}%",
-        "tot_rev": f"{agg_food_w4-agg_food_w1:+.2f} pp", "act": f"{food_act:+.2f}%" if food_act is not None else "Pending"
-    }]
-    for cat_k, cfg in ALL_CATEGORIES.items():
-        cp = cat_payloads[cat_k]
-        w1, w2, w3, w4 = cp["conv_y"]
-        r2, r3, r4 = cp["rev_y"]
-        act_val = cp["conv_act"]
-        t_rows.append({
-            "name": cfg["title"], "coicop": cfg["coicop"], "type": "U-MIDAS" if cfg["type"] == "umidas" else "SAR-D",
-            "w": cp["weight_pct"], "w1": f"{w1:+.2f}%", "r2": f"{r2:+.2f} pp", "w2": f"{w2:+.2f}%",
-            "r3": f"{r3:+.2f} pp", "w3": f"{w3:+.2f}%", "r4": f"{r4:+.2f} pp", "w4": f"{w4:+.2f}%",
-            "tot_rev": f"{w4-w1:+.2f} pp", "act": f"{act_val:+.2f}%" if act_val is not None else "Pending"
-        })
+    # Wyliczenie danych rewizji dla bieżącego i poprzedniego miesiąca
+    rev_curr = compute_revisions_for_month(country, t_year, t_month)
+    rev_comp = compute_revisions_for_month(country, prev_y, prev_m)
+    t_rows = rev_curr["table_rows"]
+    for cat_k in ALL_CATEGORIES.keys():
+        cat_payloads[cat_k]["conv_y"] = rev_curr["categories"][cat_k]["conv_y"]
+        cat_payloads[cat_k]["rev_y"] = rev_curr["categories"][cat_k]["rev_y"]
+        cat_payloads[cat_k]["rev_colors"] = rev_curr["categories"][cat_k]["rev_colors"]
 
     # Historia 6 miesięcy
     h_months = []
@@ -425,7 +558,7 @@ def compute_country_payload(country: str) -> Dict[str, Any]:
     target_m_loc = MONTH_LOCATIVE_EN.get(t_month, f"in Month {t_month}")
     seas_dict = {}
     s_table_rows = []
-    cat_nowcasts = {k: cat_payloads[k]["conv_y"][-1] for k in ALL_CATEGORIES.keys()}
+    cat_nowcasts = {k: cat_payloads[k]["nowcast_val"] for k in ALL_CATEGORIES.keys()}
     cat_nowcasts["food_total"] = agg_food_w4
 
     for cat_k, cfg in SEASONAL_CATEGORIES.items():
@@ -493,6 +626,8 @@ def compute_country_payload(country: str) -> Dict[str, Any]:
         "food_yoy_val": agg_food_yoy,
         "food_sub": food_sub,
         "categories": cat_payloads,
+        "revisions_current": rev_curr,
+        "revisions_completed": rev_comp,
         "table_rows": t_rows,
         "h_months": h_months,
         "h_revs": h_revs,
@@ -654,8 +789,389 @@ Selecting a country from the dropdown immediately updates all KPI cards, decompo
 #nowcasts-decomposition .bslib-value-box .value-box-description {
   display: none !important;
 }
+
+/* Ensure full 100% width and perfect header-cell alignment for EU-27 Database */
+#eu-27-cross-country-database {
+  width: 100% !important;
+}
+#eu-27-cross-country-database .bslib-grid {
+  grid-template-columns: 1fr !important;
+  width: 100% !important;
+}
+#eu-27-cross-country-database .card {
+  width: 100% !important;
+  max-width: 100% !important;
+}
+#eu-27-cross-country-database .card-body {
+  padding: 12px !important;
+  width: 100% !important;
+  overflow-x: auto !important;
+}
+#eu-27-cross-country-database .dataTables_wrapper {
+  width: 100% !important;
+}
+#eu-27-cross-country-database table.dataTable {
+  width: 100% !important;
+  margin: 0 auto !important;
+  table-layout: auto !important;
+}
+#eu-27-cross-country-database table.dataTable th,
+#eu-27-cross-country-database table.dataTable td {
+  white-space: nowrap !important;
+  text-align: center !important;
+  padding: 7px 9px !important;
+  font-size: 0.85rem !important;
+}
+#eu-27-cross-country-database table.dataTable th:nth-child(2),
+#eu-27-cross-country-database table.dataTable td:nth-child(2) {
+  text-align: left !important;
+  font-weight: 600 !important;
+}
 </style>
 ```
+
+```{python}
+#| echo: false
+#| output: asis
+print(f'<script id="all-countries-data" type="application/json">\n{ALL_DATA_JSON}\n</script>')
+```
+
+```{=html}
+<!-- Client-side interactive country selector controller -->
+<script>
+document.addEventListener("DOMContentLoaded", function() {
+    const rawEl = document.getElementById("all-countries-data");
+    if (!rawEl) return;
+    let data;
+    try {
+        data = JSON.parse(rawEl.textContent);
+    } catch (e) {
+        console.error("Data parsing error:", e);
+        return;
+    }
+
+    const selector = document.getElementById("country-selector");
+    if (!selector) return;
+
+    const catKeysOrder = ["cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
+    const convCatKeys = ["cereal", "meat", "dairy", "oilseeds", "fruits", "vegetables"];
+
+    let currentRevisionMode = 'current';
+
+    window.switchRevisionMode = function(mode) {
+        currentRevisionMode = mode;
+        const btnSep = document.getElementById("btn-rev-sep");
+        const btnAug = document.getElementById("btn-rev-aug");
+        if (btnSep && btnAug) {
+            if (mode === 'current') {
+                btnSep.className = "btn btn-primary active";
+                btnAug.className = "btn btn-outline-primary";
+            } else {
+                btnAug.className = "btn btn-primary active";
+                btnSep.className = "btn btn-outline-primary";
+            }
+        }
+        const countryCode = document.getElementById("country-selector").value;
+        const cd = data[countryCode];
+        if (cd) {
+            renderRevisionContent(cd);
+        }
+    };
+
+    function renderRevisionContent(cd) {
+        const revData = (currentRevisionMode === 'current') ? (cd.revisions_current || cd) : (cd.revisions_completed || cd);
+        if (!revData) return;
+
+        // 1. Evolution table
+        const evoTbody = document.getElementById("dyn-evolution-tbody");
+        if (evoTbody && revData.table_rows) {
+            let html = "";
+            revData.table_rows.forEach((r, i) => {
+                const isHead = (i === 0);
+                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
+                    <td>${r.name}</td>
+                    <td><code>${r.coicop}</code></td>
+                    <td><span class="badge ${r.type === 'BOTTOM-UP' ? 'bg-primary' : (r.type === 'U-MIDAS' ? 'bg-danger' : 'bg-secondary')}">${r.type}</span></td>
+                    <td>${r.w}</td>
+                    <td>${r.w1}</td>
+                    <td style="color:${parseFloat(r.r2) > 0 ? '#1a7f37' : (parseFloat(r.r2) < 0 ? '#cf222e' : '#6c757d')}">${r.r2}</td>
+                    <td>${r.w2}</td>
+                    <td style="color:${parseFloat(r.r3) > 0 ? '#1a7f37' : (parseFloat(r.r3) < 0 ? '#cf222e' : '#6c757d')}">${r.r3}</td>
+                    <td>${r.w3}</td>
+                    <td style="color:${parseFloat(r.r4) > 0 ? '#1a7f37' : (parseFloat(r.r4) < 0 ? '#cf222e' : '#6c757d')}">${r.r4}</td>
+                    <td><b>${r.w4}</b></td>
+                    <td style="color:${parseFloat(r.tot_rev) > 0 ? '#1a7f37' : (parseFloat(r.tot_rev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.tot_rev}</b></td>
+                    <td>${r.act}</td>
+                </tr>`;
+            });
+            evoTbody.innerHTML = html;
+        }
+
+        // 2. Convergence charts on Page 3
+        const convPanes = document.querySelectorAll("#within-month-revisions .tab-pane");
+        convCatKeys.forEach((k, idx) => {
+            const tabPane = convPanes[idx];
+            if (tabPane && window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                const cp = revData.categories ? revData.categories[k] : (cd.categories ? cd.categories[k] : null);
+                if (gDiv && cp) {
+                    Plotly.restyle(gDiv, {
+                        y: [cp.conv_y],
+                        text: [cp.conv_y.map(v => (v !== null && v !== undefined) ? ((v >= 0 ? "+" : "") + v.toFixed(1) + "%") : "Pending")]
+                    }, [0]);
+                    if (gDiv.data.length > 1) {
+                        if (cp.conv_act !== null && cp.conv_act !== undefined) {
+                            Plotly.restyle(gDiv, {
+                                y: [[cp.conv_act, cp.conv_act, cp.conv_act, cp.conv_act]],
+                                visible: true
+                            }, [1]);
+                        } else {
+                            Plotly.restyle(gDiv, { visible: false }, [1]);
+                        }
+                    }
+                    const barTraceIdx = (gDiv.data.length > 2) ? 2 : (gDiv.data.length > 1 ? 1 : null);
+                    if (barTraceIdx !== null && gDiv.data[barTraceIdx].type === 'bar') {
+                        Plotly.restyle(gDiv, {
+                            y: [cp.rev_y],
+                            "marker.color": [cp.rev_colors],
+                            text: [cp.rev_y.map(v => (v !== null && v !== undefined) ? ((v >= 0 ? "+" : "") + v.toFixed(1) + " pp") : "—")]
+                        }, [barTraceIdx]);
+                    }
+                }
+            }
+        });
+    }
+
+    function updateDashboard(countryCode) {
+        const cd = data[countryCode];
+        if (!cd) return;
+
+        // 1. Analytical profile in sidebar
+        const nameEl = document.getElementById("dyn-profile-name");
+        const codeEl = document.getElementById("dyn-profile-code");
+        const wCountryEl = document.getElementById("dyn-weights-country");
+        if (nameEl) nameEl.textContent = cd.name;
+        if (codeEl) codeEl.textContent = cd.code;
+        if (wCountryEl) wCountryEl.textContent = cd.code;
+
+        // 2. Weight breakdown in sidebar
+        const wContainer = document.getElementById("dyn-weights-container");
+        if (wContainer) {
+            let html = "<ul style='margin-bottom:0; padding-left:18px;'>";
+            const titles = {
+                "cereal": "Bread & Cereals", "meat": "Meat", "seasonal_fish": "Fish & Seafood",
+                "dairy": "Milk, Cheese & Eggs", "oilseeds": "Oils & Fats", "fruits": "Fruits",
+                "vegetables": "Vegetables", "seasonal_sugar": "Sugar & Sweets", "seasonal_food_nec": "Food Products n.e.c."
+            };
+            const coicops = {
+                "cereal": "CP0111", "meat": "CP0112", "seasonal_fish": "CP0113",
+                "dairy": "CP0114", "oilseeds": "CP0115", "fruits": "CP0116",
+                "vegetables": "CP0117", "seasonal_sugar": "CP0118", "seasonal_food_nec": "CP0119"
+            };
+            catKeysOrder.forEach(k => {
+                const cp = cd.categories[k];
+                if (cp) {
+                    html += `<li>${titles[k]}: <b>${cp.weight_pct}</b> (<code>${coicops[k]}</code>)</li>`;
+                }
+            });
+            html += "</ul>";
+            wContainer.innerHTML = html;
+        }
+
+        // 3. ValueBox cards (10 cards on Nowcasts & Decomposition)
+        const vbs = document.querySelectorAll("#nowcasts-decomposition .bslib-value-box");
+        if (vbs.length >= 10) {
+            // Card 0: Total Food
+            const v0 = vbs[0].querySelector(".value-box-value");
+            if (v0) {
+                v0.innerHTML = `<div class="vb-mom-rate">${cd.food_w4}</div><div class="vb-yoy-rate">${cd.food_yoy}</div><div class="vb-subtext">${cd.food_sub}</div>`;
+            }
+
+            // Cards 1..9: Category sectors
+            catKeysOrder.forEach((k, idx) => {
+                const vb = vbs[idx + 1];
+                if (vb && cd.categories[k]) {
+                    const cp = cd.categories[k];
+                    const vEl = vb.querySelector(".value-box-value");
+                    if (vEl) {
+                        vEl.innerHTML = `<div class="vb-mom-rate">${cp.w4_str}</div><div class="vb-yoy-rate">${cp.yoy_str}</div><div class="vb-subtext">${cp.subtext}</div>`;
+                    }
+                }
+            });
+        }
+
+        // 4. Waterfall and Top Drivers charts (9 tabs in Row 2)
+        catKeysOrder.forEach((k, idx) => {
+            const tabPane = document.querySelector(`.tab-pane[id*="card-tabset-11-${idx + 1}"]`);
+            if (tabPane && window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                const cp = cd.categories[k];
+                if (gDiv && cp) {
+                    // Update trace 0: Waterfall
+                    Plotly.restyle(gDiv, {
+                        x: [cp.wf_x],
+                        y: [cp.wf_y],
+                        text: [cp.wf_text]
+                    }, [0]);
+
+                    // Update trace 1: Top Drivers Bar
+                    Plotly.restyle(gDiv, {
+                        x: [cp.d_impacts],
+                        y: [cp.d_names],
+                        text: [cp.d_impacts.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")],
+                        "marker.color": [cp.d_colors]
+                    }, [1]);
+
+                    // Update annotations verification note
+                    if (gDiv.layout && gDiv.layout.annotations) {
+                        const metaIdx = gDiv.layout.annotations.findIndex(a => a.text && (a.text.includes("Metadata") || a.text.includes("Metadane")));
+                        if (metaIdx !== -1) {
+                            Plotly.relayout(gDiv, {
+                                [`annotations[${metaIdx}].text`]: `<b>Metadata:</b> Weight: ${cp.weight_pct} | <b>Verification:</b> ${cp.verif}`
+                            });
+                        }
+                    }
+                }
+            }
+        });
+
+        // 5. Highlight active country on EU-27 benchmark charts
+        document.querySelectorAll(".tab-pane[id*='card-tabset-21']").forEach(tabPane => {
+            if (window.Plotly) {
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                if (gDiv && gDiv.data && gDiv.data[0]) {
+                    const xVals = gDiv.data[0].x;
+                    const colors = xVals.map(c => (c === countryCode ? "#cf222e" : "#0969da"));
+                    Plotly.restyle(gDiv, { "marker.color": [colors] }, [0]);
+                }
+            }
+        });
+
+        // 6. Within-Month Revisions (Page 3)
+        renderRevisionContent(cd);
+
+        // 8. History chart and table on Page 3
+        const histDiv = document.querySelector("#within-month-revisions .plotly-graph-div");
+        if (histDiv && window.Plotly && cd.h_months) {
+            Plotly.restyle(histDiv, {
+                x: [cd.h_months],
+                y: [cd.h_revs],
+                text: [cd.h_revs.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")]
+            }, [0]);
+        }
+        const histTbody = document.getElementById("dyn-hist-tbody");
+        if (histTbody && cd.h_rows) {
+            let html = "";
+            cd.h_rows.forEach(r => {
+                html += `<tr>
+                    <td><b>${r.m}</b></td>
+                    <td>${r.w1}</td>
+                    <td><b>${r.w4}</b></td>
+                    <td style="color:${parseFloat(r.rev) > 0 ? '#cf222e' : (parseFloat(r.rev) < 0 ? '#1a7f37' : '#6c757d')}">${r.rev}</td>
+                    <td>${r.act}</td>
+                    <td>${r.err}</td>
+                </tr>`;
+            });
+            histTbody.innerHTML = html;
+        }
+
+        // 9. Update seasonal patterns on Seasonal Analysis page
+        const seasVbs = document.querySelectorAll("#seasonal-pattern-vs-nowcast .bslib-value-box");
+        if (seasVbs.length >= 4 && cd.seasonal_kpi) {
+            const v0 = seasVbs[0].querySelector(".value-box-value");
+            if (v0) v0.textContent = cd.seasonal_kpi.mean_str;
+            const v1 = seasVbs[1].querySelector(".value-box-value");
+            if (v1) v1.textContent = cd.seasonal_kpi.nowcast_str;
+            const v2 = seasVbs[2].querySelector(".value-box-value");
+            if (v2) v2.textContent = cd.seasonal_kpi.dev_str;
+            const v3 = seasVbs[3].querySelector(".value-box-value");
+            if (v3) v3.textContent = cd.seasonal_kpi.range_str;
+        }
+
+        const seasKeys = ["food_total", "cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
+        const seasPanes = document.querySelectorAll("#seasonal-pattern-vs-nowcast .tab-pane");
+        seasPanes.forEach((tabPane, idx) => {
+            const k = seasKeys[idx];
+            if (tabPane && window.Plotly && cd.seasonal && cd.seasonal[k]) {
+                const s = cd.seasonal[k];
+                const gDiv = tabPane.querySelector(".plotly-graph-div");
+                if (gDiv) {
+                    Plotly.restyle(gDiv, {
+                        x: [s.years],
+                        y: [s.vals],
+                        text: [s.vals.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%")],
+                        "marker.color": [s.colors]
+                    }, [0]);
+
+                    if (gDiv.layout && gDiv.layout.shapes && gDiv.layout.shapes.length > 0) {
+                        Plotly.relayout(gDiv, {
+                            "shapes[0].y0": s.mean,
+                            "shapes[0].y1": s.mean,
+                            "annotations[0].y": s.mean,
+                            "annotations[0].text": `Historical Mean (2015–2025): ${s.mean >= 0 ? "+" : ""}${s.mean.toFixed(1)}%`
+                        });
+                    }
+                }
+            }
+        });
+
+        const seasTbody = document.getElementById("dyn-seasonal-tbody");
+        if (seasTbody && cd.seasonal_rows) {
+            let html = "";
+            cd.seasonal_rows.forEach((r, i) => {
+                const isHead = (i === 0);
+                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
+                    <td>${r.name}</td>
+                    <td><code>${r.coicop}</code></td>
+                    <td>${r.mean}</td>
+                    <td>${r.range}</td>
+                    <td><b>${r.nowcast}</b></td>
+                    <td style="color:${parseFloat(r.dev) > 0 ? '#1a7f37' : (parseFloat(r.dev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.dev}</b></td>
+                    <td><span class="badge ${r.status_badge}">${r.status_text}</span></td>
+                </tr>`;
+            });
+            seasTbody.innerHTML = html;
+        }
+    }
+
+    selector.addEventListener("change", function(e) {
+        updateDashboard(e.target.value);
+    });
+
+    // Initial render on page load
+    updateDashboard(selector.value);
+
+    // Guarantee that the dashboard activates Nowcasts & Decomposition on load (fixing any blank initial page)
+    function ensureInitialTab() {
+        let hash = window.location.hash;
+        const validHashes = ["#nowcasts-decomposition", "#seasonal-pattern-vs-nowcast", "#within-month-revisions", "#eu-27-cross-country-database"];
+        if (!validHashes.includes(hash)) {
+            hash = "#nowcasts-decomposition";
+        }
+        const targetBtn = document.getElementById("tab-" + hash.replace("#", ""));
+        if (targetBtn) {
+            targetBtn.click();
+        }
+    }
+    // Whenever EU-27 tab is clicked or shown, adjust DataTables column sizing
+    const euTabBtn = document.getElementById("tab-eu-27-cross-country-database");
+    if (euTabBtn) {
+        euTabBtn.addEventListener("click", function() {
+            setTimeout(function() {
+                if (window.jQuery && jQuery.fn.dataTable) {
+                    jQuery(jQuery.fn.dataTable.tables(true)).DataTable().columns.adjust();
+                }
+            }, 100);
+        });
+    }
+
+    ensureInitialTab();
+    setTimeout(ensureInitialTab, 150);
+    window.addEventListener("hashchange", ensureInitialTab);
+});
+</script>
+```
+
 
 # 🎯 Nowcasts & Decomposition {icon="speedometer2" scrolling="true"}
 
@@ -1121,6 +1637,18 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 ## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4) {height="32%"}
 
 ```{=html}
+<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 12.5px;">
+  <div class="d-flex align-items-center">
+    <span class="me-2" style="font-size: 18px;">ℹ️</span>
+    <span>
+      <b>Data Release Monitoring:</b> Live target month is <b>September 2026 (Week 2 available)</b>. Weeks 3 and 4 are upcoming. Switch to <b>August 2026</b> to inspect a completed month with full 4-week convergence.
+    </span>
+  </div>
+  <div class="btn-group btn-group-sm mt-1 mt-md-0" role="group" id="month-rev-toggle">
+    <button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')">📅 September 2026 (Live: W2 In-Progress)</button>
+    <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ August 2026 (Full Month: W1 → W4)</button>
+  </div>
+</div>
 <div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
   <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
     <thead class="table-light sticky-top">
@@ -1165,11 +1693,12 @@ def build_conv_chart(cat_k: str):
     )
     
     x_weeks = ["W1 (Week 1)", "W2 (Week 2)", "W3 (Week 3)", "W4 (Week 4)"]
+    conv_text = [(f"{v:+.1f}%" if v is not None else "Pending") for v in c["conv_y"]]
     fig.add_trace(
         go.Scatter(
             x=x_weeks, y=c["conv_y"], mode="lines+markers+text", name="Nowcast U-MIDAS",
             line=dict(color="#0969da", width=3), marker=dict(size=9, color="#0969da"),
-            text=[f"{v:+.1f}%" for v in c["conv_y"]], textposition="top center"
+            text=conv_text, textposition="top center"
         ),
         row=1, col=1
     )
@@ -1184,10 +1713,11 @@ def build_conv_chart(cat_k: str):
         )
         
     rev_steps = ["Revision W2 (vs W1)", "Revision W3 (vs W2)", "Revision W4 (vs W3)"]
+    rev_text = [(f"{v:+.1f} pp" if v is not None else "—") for v in c["rev_y"]]
     fig.add_trace(
         go.Bar(
             x=rev_steps, y=c["rev_y"], marker_color=c["rev_colors"],
-            text=[f"{v:+.1f} pp" for v in c["rev_y"]], textposition="outside"
+            text=rev_text, textposition="outside"
         ),
         row=1, col=2
     )
@@ -1312,302 +1842,5 @@ for c_code, c_name in EU27_COUNTRIES.items():
     })
 
 df_eu_full = pd.DataFrame(eu_summary_list)
-show(df_eu_full, classes="display compact", paging=True, pageLength=15, scrollX=True)
-```
-
-```{=html}
-<!-- Baza danych JSON dla 27 państw UE -->
-<script id="all-countries-data" type="application/json">
-```{python}
-#| echo: false
-#| output: asis
-print(ALL_DATA_JSON)
-```
-</script>
-
-<!-- Client-side interactive country selector controller -->
-<script>
-document.addEventListener("DOMContentLoaded", function() {
-    const rawEl = document.getElementById("all-countries-data");
-    if (!rawEl) return;
-    let data;
-    try {
-        data = JSON.parse(rawEl.textContent);
-    } catch (e) {
-        console.error("Data parsing error:", e);
-        return;
-    }
-
-    const selector = document.getElementById("country-selector");
-    if (!selector) return;
-
-    const catKeysOrder = ["cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
-    const convCatKeys = ["cereal", "meat", "dairy", "oilseeds", "fruits", "vegetables"];
-
-    function updateDashboard(countryCode) {
-        const cd = data[countryCode];
-        if (!cd) return;
-
-        // 1. Analytical profile in sidebar
-        const nameEl = document.getElementById("dyn-profile-name");
-        const codeEl = document.getElementById("dyn-profile-code");
-        const wCountryEl = document.getElementById("dyn-weights-country");
-        if (nameEl) nameEl.textContent = cd.name;
-        if (codeEl) codeEl.textContent = cd.code;
-        if (wCountryEl) wCountryEl.textContent = cd.code;
-
-        // 2. Weight breakdown in sidebar
-        const wContainer = document.getElementById("dyn-weights-container");
-        if (wContainer) {
-            let html = "<ul style='margin-bottom:0; padding-left:18px;'>";
-            const titles = {
-                "cereal": "Bread & Cereals", "meat": "Meat", "seasonal_fish": "Fish & Seafood",
-                "dairy": "Milk, Cheese & Eggs", "oilseeds": "Oils & Fats", "fruits": "Fruits",
-                "vegetables": "Vegetables", "seasonal_sugar": "Sugar & Sweets", "seasonal_food_nec": "Food Products n.e.c."
-            };
-            const coicops = {
-                "cereal": "CP0111", "meat": "CP0112", "seasonal_fish": "CP0113",
-                "dairy": "CP0114", "oilseeds": "CP0115", "fruits": "CP0116",
-                "vegetables": "CP0117", "seasonal_sugar": "CP0118", "seasonal_food_nec": "CP0119"
-            };
-            catKeysOrder.forEach(k => {
-                const cp = cd.categories[k];
-                if (cp) {
-                    html += `<li>${titles[k]}: <b>${cp.weight_pct}</b> (<code>${coicops[k]}</code>)</li>`;
-                }
-            });
-            html += "</ul>";
-            wContainer.innerHTML = html;
-        }
-
-        // 3. ValueBox cards (10 cards on Nowcasts & Decomposition)
-        const vbs = document.querySelectorAll("#nowcasts-decomposition .bslib-value-box");
-        if (vbs.length >= 10) {
-            // Card 0: Total Food
-            const v0 = vbs[0].querySelector(".value-box-value");
-            if (v0) {
-                v0.innerHTML = `<div class="vb-mom-rate">${cd.food_w4}</div><div class="vb-yoy-rate">${cd.food_yoy}</div><div class="vb-subtext">${cd.food_sub}</div>`;
-            }
-
-            // Cards 1..9: Category sectors
-            catKeysOrder.forEach((k, idx) => {
-                const vb = vbs[idx + 1];
-                if (vb && cd.categories[k]) {
-                    const cp = cd.categories[k];
-                    const vEl = vb.querySelector(".value-box-value");
-                    if (vEl) {
-                        vEl.innerHTML = `<div class="vb-mom-rate">${cp.w4_str}</div><div class="vb-yoy-rate">${cp.yoy_str}</div><div class="vb-subtext">${cp.subtext}</div>`;
-                    }
-                }
-            });
-        }
-
-        // 4. Waterfall and Top Drivers charts (9 tabs in Row 2)
-        catKeysOrder.forEach((k, idx) => {
-            const tabPane = document.querySelector(`.tab-pane[id*="card-tabset-11-${idx + 1}"]`);
-            if (tabPane && window.Plotly) {
-                const gDiv = tabPane.querySelector(".plotly-graph-div");
-                const cp = cd.categories[k];
-                if (gDiv && cp) {
-                    // Update trace 0: Waterfall
-                    Plotly.restyle(gDiv, {
-                        x: [cp.wf_x],
-                        y: [cp.wf_y],
-                        text: [cp.wf_text]
-                    }, [0]);
-
-                    // Update trace 1: Top Drivers Bar
-                    Plotly.restyle(gDiv, {
-                        x: [cp.d_impacts],
-                        y: [cp.d_names],
-                        text: [cp.d_impacts.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")],
-                        "marker.color": [cp.d_colors]
-                    }, [1]);
-
-                    // Update annotations verification note
-                    if (gDiv.layout && gDiv.layout.annotations) {
-                        const metaIdx = gDiv.layout.annotations.findIndex(a => a.text && (a.text.includes("Metadata") || a.text.includes("Metadane")));
-                        if (metaIdx !== -1) {
-                            Plotly.relayout(gDiv, {
-                                [`annotations[${metaIdx}].text`]: `<b>Metadata:</b> Weight: ${cp.weight_pct} | <b>Verification:</b> ${cp.verif}`
-                            });
-                        }
-                    }
-                }
-            }
-        });
-
-        // 5. Highlight active country on EU-27 benchmark charts
-        document.querySelectorAll(".tab-pane[id*='card-tabset-21']").forEach(tabPane => {
-            if (window.Plotly) {
-                const gDiv = tabPane.querySelector(".plotly-graph-div");
-                if (gDiv && gDiv.data && gDiv.data[0]) {
-                    const xVals = gDiv.data[0].x;
-                    const colors = xVals.map(c => (c === countryCode ? "#cf222e" : "#0969da"));
-                    Plotly.restyle(gDiv, { "marker.color": [colors] }, [0]);
-                }
-            }
-        });
-
-        // 6. Evolution table on Page 3
-        const evoTbody = document.getElementById("dyn-evolution-tbody");
-        if (evoTbody && cd.table_rows) {
-            let html = "";
-            cd.table_rows.forEach((r, i) => {
-                const isHead = (i === 0);
-                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
-                    <td>${r.name}</td>
-                    <td><code>${r.coicop}</code></td>
-                    <td><span class="badge ${r.type === 'BOTTOM-UP' ? 'bg-primary' : (r.type === 'U-MIDAS' ? 'bg-danger' : 'bg-secondary')}">${r.type}</span></td>
-                    <td>${r.w}</td>
-                    <td>${r.w1}</td>
-                    <td style="color:${parseFloat(r.r2) > 0 ? '#1a7f37' : (parseFloat(r.r2) < 0 ? '#cf222e' : '#6c757d')}">${r.r2}</td>
-                    <td>${r.w2}</td>
-                    <td style="color:${parseFloat(r.r3) > 0 ? '#1a7f37' : (parseFloat(r.r3) < 0 ? '#cf222e' : '#6c757d')}">${r.r3}</td>
-                    <td>${r.w3}</td>
-                    <td style="color:${parseFloat(r.r4) > 0 ? '#1a7f37' : (parseFloat(r.r4) < 0 ? '#cf222e' : '#6c757d')}">${r.r4}</td>
-                    <td><b>${r.w4}</b></td>
-                    <td style="color:${parseFloat(r.tot_rev) > 0 ? '#1a7f37' : (parseFloat(r.tot_rev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.tot_rev}</b></td>
-                    <td>${r.act}</td>
-                </tr>`;
-            });
-            evoTbody.innerHTML = html;
-        }
-
-        // 7. Convergence charts on Page 3
-        convCatKeys.forEach((k, idx) => {
-            const tabPane = document.querySelector(`.tab-pane[id*="card-tabset-33-${idx + 1}"]`);
-            if (tabPane && window.Plotly) {
-                const gDiv = tabPane.querySelector(".plotly-graph-div");
-                const cp = cd.categories[k];
-                if (gDiv && cp) {
-                    Plotly.restyle(gDiv, {
-                        y: [cp.conv_y],
-                        text: [cp.conv_y.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%")]
-                    }, [0]);
-                    if (gDiv.data.length > 1 && cp.conv_act !== null) {
-                        Plotly.restyle(gDiv, {
-                            y: [[cp.conv_act, cp.conv_act, cp.conv_act, cp.conv_act]]
-                        }, [1]);
-                    }
-                    const barTraceIdx = (gDiv.data.length > 2) ? 2 : (gDiv.data.length > 1 ? 1 : null);
-                    if (barTraceIdx !== null && gDiv.data[barTraceIdx].type === 'bar') {
-                        Plotly.restyle(gDiv, {
-                            y: [cp.rev_y],
-                            "marker.color": [cp.rev_colors],
-                            text: [cp.rev_y.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")]
-                        }, [barTraceIdx]);
-                    }
-                }
-            }
-        });
-
-        // 8. History chart and table on Page 3
-        const histDiv = document.querySelector("#within-month-revisions .plotly-graph-div");
-        if (histDiv && window.Plotly && cd.h_months) {
-            Plotly.restyle(histDiv, {
-                x: [cd.h_months],
-                y: [cd.h_revs],
-                text: [cd.h_revs.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + " pp")]
-            }, [0]);
-        }
-        const histTbody = document.getElementById("dyn-hist-tbody");
-        if (histTbody && cd.h_rows) {
-            let html = "";
-            cd.h_rows.forEach(r => {
-                html += `<tr>
-                    <td><b>${r.m}</b></td>
-                    <td>${r.w1}</td>
-                    <td><b>${r.w4}</b></td>
-                    <td style="color:${parseFloat(r.rev) > 0 ? '#cf222e' : (parseFloat(r.rev) < 0 ? '#1a7f37' : '#6c757d')}">${r.rev}</td>
-                    <td>${r.act}</td>
-                    <td>${r.err}</td>
-                </tr>`;
-            });
-            histTbody.innerHTML = html;
-        }
-
-        // 9. Update seasonal patterns on Seasonal Analysis page
-        const seasVbs = document.querySelectorAll("#seasonal-pattern-vs-nowcast .bslib-value-box");
-        if (seasVbs.length >= 4 && cd.seasonal_kpi) {
-            const v0 = seasVbs[0].querySelector(".value-box-value");
-            if (v0) v0.textContent = cd.seasonal_kpi.mean_str;
-            const v1 = seasVbs[1].querySelector(".value-box-value");
-            if (v1) v1.textContent = cd.seasonal_kpi.nowcast_str;
-            const v2 = seasVbs[2].querySelector(".value-box-value");
-            if (v2) v2.textContent = cd.seasonal_kpi.dev_str;
-            const v3 = seasVbs[3].querySelector(".value-box-value");
-            if (v3) v3.textContent = cd.seasonal_kpi.range_str;
-        }
-
-        const seasKeys = ["food_total", "cereal", "meat", "seasonal_fish", "dairy", "oilseeds", "fruits", "vegetables", "seasonal_sugar", "seasonal_food_nec"];
-        const seasPanes = document.querySelectorAll("#seasonal-pattern-vs-nowcast .tab-pane");
-        seasPanes.forEach((tabPane, idx) => {
-            const k = seasKeys[idx];
-            if (tabPane && window.Plotly && cd.seasonal && cd.seasonal[k]) {
-                const s = cd.seasonal[k];
-                const gDiv = tabPane.querySelector(".plotly-graph-div");
-                if (gDiv) {
-                    Plotly.restyle(gDiv, {
-                        x: [s.years],
-                        y: [s.vals],
-                        text: [s.vals.map(v => (v >= 0 ? "+" : "") + v.toFixed(1) + "%")],
-                        "marker.color": [s.colors]
-                    }, [0]);
-
-                    if (gDiv.layout && gDiv.layout.shapes && gDiv.layout.shapes.length > 0) {
-                        Plotly.relayout(gDiv, {
-                            "shapes[0].y0": s.mean,
-                            "shapes[0].y1": s.mean,
-                            "annotations[0].y": s.mean,
-                            "annotations[0].text": `Historical Mean (2015–2025): ${s.mean >= 0 ? "+" : ""}${s.mean.toFixed(1)}%`
-                        });
-                    }
-                }
-            }
-        });
-
-        const seasTbody = document.getElementById("dyn-seasonal-tbody");
-        if (seasTbody && cd.seasonal_rows) {
-            let html = "";
-            cd.seasonal_rows.forEach((r, i) => {
-                const isHead = (i === 0);
-                html += `<tr ${isHead ? 'class="table-primary fw-bold"' : ''}>
-                    <td>${r.name}</td>
-                    <td><code>${r.coicop}</code></td>
-                    <td>${r.mean}</td>
-                    <td>${r.range}</td>
-                    <td><b>${r.nowcast}</b></td>
-                    <td style="color:${parseFloat(r.dev) > 0 ? '#1a7f37' : (parseFloat(r.dev) < 0 ? '#cf222e' : '#6c757d')}"><b>${r.dev}</b></td>
-                    <td><span class="badge ${r.status_badge}">${r.status_text}</span></td>
-                </tr>`;
-            });
-            seasTbody.innerHTML = html;
-        }
-    }
-
-    selector.addEventListener("change", function(e) {
-        updateDashboard(e.target.value);
-    });
-
-    // Initial render on page load
-    updateDashboard(selector.value);
-
-    // Guarantee that the dashboard activates Nowcasts & Decomposition on load (fixing any blank initial page)
-    function ensureInitialTab() {
-        let hash = window.location.hash;
-        const validHashes = ["#nowcasts-decomposition", "#seasonal-pattern-vs-nowcast", "#within-month-revisions", "#eu-27-cross-country-database"];
-        if (!validHashes.includes(hash)) {
-            hash = "#nowcasts-decomposition";
-        }
-        const targetBtn = document.getElementById("tab-" + hash.replace("#", ""));
-        if (targetBtn) {
-            targetBtn.click();
-        }
-    }
-    ensureInitialTab();
-    setTimeout(ensureInitialTab, 150);
-    window.addEventListener("hashchange", ensureInitialTab);
-});
-</script>
+show(df_eu_full, classes="display compact stripe w-100", paging=True, pageLength=27, scrollX=False, autoWidth=False, style="width: 100%;")
 ```
