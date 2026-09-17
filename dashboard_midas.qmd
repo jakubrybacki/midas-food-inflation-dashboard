@@ -827,6 +827,20 @@ Selecting a country from the dropdown immediately updates all KPI cards, decompo
   text-align: left !important;
   font-weight: 600 !important;
 }
+
+/* Stack Within-Month Revisions elements cleanly one below the other across full width */
+#within-month-revisions {
+  width: 100% !important;
+}
+#within-month-revisions .bslib-grid {
+  grid-template-columns: 1fr !important;
+  width: 100% !important;
+}
+#within-month-revisions .card {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin-bottom: 20px !important;
+}
 </style>
 ```
 
@@ -928,14 +942,6 @@ document.addEventListener("DOMContentLoaded", function() {
                         } else {
                             Plotly.restyle(gDiv, { visible: false }, [1]);
                         }
-                    }
-                    const barTraceIdx = (gDiv.data.length > 2) ? 2 : (gDiv.data.length > 1 ? 1 : null);
-                    if (barTraceIdx !== null && gDiv.data[barTraceIdx].type === 'bar') {
-                        Plotly.restyle(gDiv, {
-                            y: [cp.rev_y],
-                            "marker.color": [cp.rev_colors],
-                            text: [cp.rev_y.map(v => (v !== null && v !== undefined) ? ((v >= 0 ? "+" : "") + v.toFixed(1) + " pp") : "—")]
-                        }, [barTraceIdx]);
                     }
                 }
             }
@@ -1051,7 +1057,8 @@ document.addEventListener("DOMContentLoaded", function() {
         renderRevisionContent(cd);
 
         // 8. History chart and table on Page 3
-        const histDiv = document.querySelector("#within-month-revisions .plotly-graph-div");
+        const allHistDivs = document.querySelectorAll("#within-month-revisions .plotly-graph-div");
+        const histDiv = allHistDivs.length > 0 ? allHistDivs[allHistDivs.length - 1] : null;
         if (histDiv && window.Plotly && cd.h_months) {
             Plotly.restyle(histDiv, {
                 x: [cd.h_months],
@@ -1632,9 +1639,9 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 ```
 
 
-# 🔄 Within-Month Revisions {icon="arrow-repeat"}
+# 🔄 Within-Month Revisions {icon="arrow-repeat" scrolling="true"}
 
-## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4) {height="32%"}
+## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4)
 
 ```{=html}
 <div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 12.5px;">
@@ -1649,7 +1656,7 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
     <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ August 2026 (Full Month: W1 → W4)</button>
   </div>
 </div>
-<div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
+<div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
   <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
     <thead class="table-light sticky-top">
       <tr>
@@ -1675,7 +1682,7 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 </div>
 ```
 
-## Row 2 - Convergence Paths and Weekly Adjustments {.tabset height="42%"}
+## Row 2 - Convergence Paths {.tabset}
 
 ```{python}
 #| echo: false
@@ -1683,24 +1690,16 @@ def build_conv_chart(cat_k: str):
     c = cats[cat_k]
     cfg = ALL_CATEGORIES[cat_k]
     
-    fig = make_subplots(
-        rows=1, cols=2, column_widths=[0.55, 0.45],
-        subplot_titles=[
-            f"Nowcast convergence path W1 -> W4: {cfg['title']}",
-            f"Week-on-week adjustments: {cfg['title']}"
-        ],
-        horizontal_spacing=0.1
-    )
+    fig = go.Figure()
     
     x_weeks = ["W1 (Week 1)", "W2 (Week 2)", "W3 (Week 3)", "W4 (Week 4)"]
     conv_text = [(f"{v:+.1f}%" if v is not None else "Pending") for v in c["conv_y"]]
     fig.add_trace(
         go.Scatter(
             x=x_weeks, y=c["conv_y"], mode="lines+markers+text", name="Nowcast U-MIDAS",
-            line=dict(color="#0969da", width=3), marker=dict(size=9, color="#0969da"),
+            line=dict(color="#0969da", width=3), marker=dict(size=10, color="#0969da"),
             text=conv_text, textposition="top center"
-        ),
-        row=1, col=1
+        )
     )
     if c["conv_act"] is not None:
         act = c["conv_act"]
@@ -1708,26 +1707,25 @@ def build_conv_chart(cat_k: str):
             go.Scatter(
                 x=x_weeks, y=[act]*4, mode="lines", name=f"Eurostat HICP ({act:+.1f}%)",
                 line=dict(color="#cf222e", width=2, dash="dash")
-            ),
-            row=1, col=1
+            )
+        )
+    else:
+        fig.add_trace(
+            go.Scatter(
+                x=x_weeks, y=[None]*4, mode="lines", name="Eurostat HICP",
+                line=dict(color="#cf222e", width=2, dash="dash"),
+                visible=False
+            )
         )
         
-    rev_steps = ["Revision W2 (vs W1)", "Revision W3 (vs W2)", "Revision W4 (vs W3)"]
-    rev_text = [(f"{v:+.1f} pp" if v is not None else "—") for v in c["rev_y"]]
-    fig.add_trace(
-        go.Bar(
-            x=rev_steps, y=c["rev_y"], marker_color=c["rev_colors"],
-            text=rev_text, textposition="outside"
-        ),
-        row=1, col=2
-    )
     fig.update_layout(
-        template="plotly_white", margin=dict(l=25, r=25, t=45, b=25), showlegend=True,
-        legend=dict(orientation="h", y=-0.18)
+        title=f"Nowcast convergence path W1 → W4: {cfg['title']}",
+        template="plotly_white", margin=dict(l=35, r=25, t=45, b=35), showlegend=True,
+        legend=dict(orientation="h", y=-0.22),
+        xaxis=dict(title="Monthly timeline (DG AGRI weekly releases)"),
+        yaxis=dict(title="m/m Inflation Rate (%)", tickformat=".1f"),
+        height=340
     )
-    fig.update_xaxes(title_text="Monthly timeline (DG AGRI weekly releases)", row=1, col=1)
-    fig.update_yaxes(title_text="m/m Inflation Rate (%)", tickformat=".1f", row=1, col=1)
-    fig.update_yaxes(title_text="Forecast Adjustment (p.p.)", tickformat=".1f", row=1, col=2)
     return fig
 ```
 
@@ -1767,34 +1765,33 @@ build_conv_chart("fruits").show()
 build_conv_chart("vegetables").show()
 ```
 
-## Row 3 - Revision History and Stability over the Past 6 Months {height="26%"}
+## Row 3 - Historical Food Basket Revisions (Past 6 Months)
 
 ```{python}
 #| echo: false
-fig_hist = go.Figure(go.Bar(
-    x=init_data["h_months"], y=init_data["h_revs"], marker_color="#0969da",
-    text=[f"{v:+.1f} pp" for v in init_data["h_revs"]], textposition="outside"
-))
-fig_hist.update_layout(
-    title="Magnitude of within-month revisions (W4 - W1) for food basket over the past 6 months",
-    yaxis=dict(title="Total Revision (p.p.)", tickformat=".1f"),
-    template="plotly_white",
-    margin=dict(l=25, r=25, t=40, b=25), height=220
-)
+def build_hist_chart():
+    fig = go.Figure(go.Bar(
+        x=init_data["h_months"], y=init_data["h_revs"], marker_color="#0969da",
+        text=[f"{v:+.1f} pp" for v in init_data["h_revs"]], textposition="outside"
+    ))
+    fig.update_layout(
+        title="Magnitude of within-month revisions (W4 - W1) for food basket over the past 6 months",
+        xaxis=dict(title="Target Month"),
+        yaxis=dict(title="Total Revision (p.p.)", tickformat=".1f"),
+        template="plotly_white",
+        margin=dict(l=35, r=25, t=40, b=30), height=280
+    )
+    return fig
+
+build_hist_chart().show()
 ```
 
-### Historical Food Basket Revisions {width="55%"}
-
-```{python}
-fig_hist.show()
-```
-
-### Stability Indicators Table {width="45%"}
+## Row 4 - Stability Indicators Table
 
 ```{=html}
-<div class="table-responsive" style="max-height: 220px; overflow-y: auto;">
-  <table class="table table-sm table-hover table-striped" style="font-size: 12px;">
-    <thead class="table-light">
+<div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
+  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+    <thead class="table-light sticky-top">
       <tr>
         <th>Month</th>
         <th>Nowcast W1</th>
