@@ -841,6 +841,43 @@ Selecting a country from the dropdown immediately updates all KPI cards, decompo
   max-width: 100% !important;
   margin-bottom: 20px !important;
 }
+
+/* Tables in Seasonal Pattern and Within-Month Revisions tabs - enhanced legibility and larger fonts */
+#seasonal-pattern-vs-nowcast table,
+#within-month-revisions table {
+  font-size: 14.5px !important;
+  width: 100% !important;
+}
+
+#seasonal-pattern-vs-nowcast table th,
+#within-month-revisions table th {
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  padding: 10px 12px !important;
+  vertical-align: middle !important;
+  letter-spacing: 0.2px !important;
+}
+
+#seasonal-pattern-vs-nowcast table td,
+#within-month-revisions table td {
+  font-size: 14.5px !important;
+  padding: 9px 12px !important;
+  vertical-align: middle !important;
+}
+
+#seasonal-pattern-vs-nowcast table code,
+#within-month-revisions table code {
+  font-size: 13.5px !important;
+  font-weight: 600 !important;
+  padding: 2px 6px !important;
+}
+
+#seasonal-pattern-vs-nowcast table .badge,
+#within-month-revisions table .badge {
+  font-size: 12.5px !important;
+  padding: 5px 9px !important;
+  font-weight: 600 !important;
+}
 </style>
 ```
 
@@ -1618,8 +1655,8 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 ## Row 3 - Comprehensive Seasonal Pattern Breakdown {height="380px"}
 
 ```{=html}
-<div class="table-responsive" style="max-height: 350px; overflow-y: auto;">
-  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+<div class="table-responsive" style="max-height: 380px; overflow-y: auto;">
+  <table class="table table-hover table-striped align-middle" style="font-size: 14.5px;">
     <thead class="table-light sticky-top">
       <tr>
         <th>Category</th>
@@ -1644,7 +1681,7 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 ## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4)
 
 ```{=html}
-<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 12.5px;">
+<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 13.5px;">
   <div class="d-flex align-items-center">
     <span class="me-2" style="font-size: 18px;">ℹ️</span>
     <span>
@@ -1656,8 +1693,8 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
     <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ August 2026 (Full Month: W1 → W4)</button>
   </div>
 </div>
-<div class="table-responsive" style="max-height: 420px; overflow-y: auto;">
-  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+<div class="table-responsive" style="max-height: 440px; overflow-y: auto;">
+  <table class="table table-hover table-striped align-middle" style="font-size: 14.5px;">
     <thead class="table-light sticky-top">
       <tr>
         <th>Category</th>
@@ -1789,8 +1826,8 @@ build_hist_chart().show()
 ## Row 4 - Stability Indicators Table
 
 ```{=html}
-<div class="table-responsive" style="max-height: 280px; overflow-y: auto;">
-  <table class="table table-sm table-hover table-striped" style="font-size: 12.5px;">
+<div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+  <table class="table table-hover table-striped align-middle" style="font-size: 14.5px;">
     <thead class="table-light sticky-top">
       <tr>
         <th>Month</th>
