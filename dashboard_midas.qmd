@@ -195,6 +195,8 @@ prev_y = t_year if t_month > 1 else t_year - 1
 prev_m = t_month - 1 if t_month > 1 else 12
 latest_w = int(df_dlog[(df_dlog["year"] == t_year) & (df_dlog["month"] == t_month)]["week_in_month"].max())
 faza_danych_str = f"Week {latest_w} (W{latest_w} - {'Current nowcast' if latest_w < 4 else 'Full month'})"
+current_month_name = MONTH_NAMES_EN[t_month]
+prev_month_name = MONTH_NAMES_EN[prev_m]
 
 available_dates = df_hicp.sort_values("date", ascending=False)["date"].dt.strftime("%Y-%m").unique().tolist()
 recent_months = available_dates[:6]
@@ -1680,19 +1682,28 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 
 ## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4)
 
-```{=html}
+```{python}
+#| echo: false
+#| output: asis
+upcoming_text = "Week 4 is upcoming." if latest_w == 3 else ("Weeks 3 and 4 are upcoming." if latest_w < 3 else "Full month completed.")
+live_status = f"W{latest_w} In-Progress" if latest_w < 4 else "W1 → W4 Complete"
+print(f"""
 <div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 13.5px;">
   <div class="d-flex align-items-center">
     <span class="me-2" style="font-size: 18px;">ℹ️</span>
     <span>
-      <b>Data Release Monitoring:</b> Live target month is <b>September 2026 (Week 2 available)</b>. Weeks 3 and 4 are upcoming. Switch to <b>August 2026</b> to inspect a completed month with full 4-week convergence.
+      <b>Data Release Monitoring:</b> Live target month is <b>{current_month_name} {t_year} (Week {latest_w} available)</b>. {upcoming_text} Switch to <b>{prev_month_name} {prev_y}</b> to inspect a completed month with full 4-week convergence.
     </span>
   </div>
   <div class="btn-group btn-group-sm mt-1 mt-md-0" role="group" id="month-rev-toggle">
-    <button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')">📅 September 2026 (Live: W2 In-Progress)</button>
-    <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ August 2026 (Full Month: W1 → W4)</button>
+    <button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')">📅 {current_month_name} {t_year} (Live: {live_status})</button>
+    <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ {prev_month_name} {prev_y} (Full Month: W1 → W4)</button>
   </div>
 </div>
+""")
+```
+
+```{=html}
 <div class="table-responsive" style="max-height: 440px; overflow-y: auto;">
   <table class="table table-hover table-striped align-middle" style="font-size: 14.5px;">
     <thead class="table-light sticky-top">
