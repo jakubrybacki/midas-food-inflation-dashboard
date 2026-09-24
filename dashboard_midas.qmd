@@ -852,39 +852,88 @@ Selecting a country from the dropdown immediately updates all KPI cards, decompo
   margin-bottom: 20px !important;
 }
 
-/* Tables in Seasonal Pattern and Within-Month Revisions tabs - enhanced legibility and larger fonts */
-#seasonal-pattern-vs-nowcast table,
-#within-month-revisions table {
-  font-size: 14.5px !important;
+/* Tables in Seasonal Pattern and Within-Month Revisions tabs - enhanced legibility and sticky headers */
+.table-responsive {
+  overflow-y: auto !important;
+  position: relative !important;
+}
+
+.table-responsive table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  font-size: 14px !important;
   width: 100% !important;
 }
 
-#seasonal-pattern-vs-nowcast table th,
-#within-month-revisions table th {
-  font-size: 14px !important;
-  font-weight: 700 !important;
-  padding: 10px 12px !important;
-  vertical-align: middle !important;
-  letter-spacing: 0.2px !important;
+/* Ensure thead and th stick to the top with solid opaque background and crisp border */
+.table-responsive thead,
+.table-responsive thead.sticky-top {
+  position: sticky !important;
+  top: 0 !important;
+  z-index: 20 !important;
 }
 
-#seasonal-pattern-vs-nowcast table td,
-#within-month-revisions table td {
-  font-size: 14.5px !important;
+.table-responsive thead th,
+.table-responsive thead.sticky-top th,
+#seasonal-pattern-vs-nowcast table thead th,
+#within-month-revisions table thead th {
+  position: sticky !important;
+  top: 0 !important;
+  background-color: #f1f3f5 !important;
+  color: #1e293b !important;
+  z-index: 20 !important;
+  font-size: 13.5px !important;
+  font-weight: 700 !important;
+  padding: 11px 12px !important;
+  vertical-align: middle !important;
+  letter-spacing: 0.2px !important;
+  border-top: none !important;
+  border-bottom: 2px solid #cbd5e1 !important;
+  box-shadow: inset 0 -2px 0 #cbd5e1, 0 3px 6px rgba(0, 0, 0, 0.08) !important;
+}
+
+/* Table body rows pass cleanly under the sticky header */
+.table-responsive tbody td,
+#seasonal-pattern-vs-nowcast table tbody td,
+#within-month-revisions table tbody td {
+  position: relative !important;
+  z-index: 1 !important;
+  font-size: 14px !important;
   padding: 9px 12px !important;
   vertical-align: middle !important;
+  background-color: #ffffff;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+.table-responsive tbody tr:nth-of-type(even) td,
+#seasonal-pattern-vs-nowcast table tbody tr:nth-of-type(even) td,
+#within-month-revisions table tbody tr:nth-of-type(even) td {
+  background-color: #f8fafc !important;
+}
+
+.table-responsive tbody tr:hover td,
+#seasonal-pattern-vs-nowcast table tbody tr:hover td,
+#within-month-revisions table tbody tr:hover td {
+  background-color: #edf2f7 !important;
+}
+
+.table-responsive tbody tr.table-primary td,
+#seasonal-pattern-vs-nowcast table tbody tr.table-primary td,
+#within-month-revisions table tbody tr.table-primary td {
+  background-color: #e0f2fe !important;
+  font-weight: 700 !important;
 }
 
 #seasonal-pattern-vs-nowcast table code,
 #within-month-revisions table code {
-  font-size: 13.5px !important;
+  font-size: 13px !important;
   font-weight: 600 !important;
   padding: 2px 6px !important;
 }
 
 #seasonal-pattern-vs-nowcast table .badge,
 #within-month-revisions table .badge {
-  font-size: 12.5px !important;
+  font-size: 12px !important;
   padding: 5px 9px !important;
   font-weight: 600 !important;
 }
@@ -1320,7 +1369,7 @@ nec = cats["seasonal_food_nec"]
 dict(value=f"{nec['w4_str']} | {nec['yoy_str']}", subtext=nec["subtext"])
 ```
 
-## Row 2 - Detailed Contribution Decomposition (All 9 Categories) {.tabset height="760px"}
+## Row 2 - Detailed Contribution Decomposition (All 9 Categories) {.tabset height="520px"}
 
 ```{python}
 #| echo: false
@@ -1331,12 +1380,12 @@ def build_category_decomp_plot(cat_k: str):
     
     fig = make_subplots(
         rows=2, cols=1,
-        row_heights=[0.52, 0.48],
+        row_heights=[0.50, 0.50],
         subplot_titles=[
             f"Contribution to m/m rate: {cfg['title']} ({cfg['coicop']})",
             "Impact on inflation nowcast: Leading commodity price shocks (DG AGRI)" if is_umidas else "Impact on inflation nowcast: Seasonal model components (SAR-D)"
         ],
-        vertical_spacing=0.12
+        vertical_spacing=0.15
     )
     
     # Wykres 1 (Góra): Wkład do stopy m/m (Kaskada Waterfall)
@@ -1365,12 +1414,12 @@ def build_category_decomp_plot(cat_k: str):
     
     fig.update_layout(
         template="plotly_white",
-        height=700,
-        margin=dict(l=35, r=35, t=45, b=45),
+        height=450,
+        margin=dict(l=35, r=35, t=35, b=35),
         showlegend=False,
         annotations=[dict(
             text=f"<b>Metadata:</b> Weight: {c['weight_pct']} | <b>Verification:</b> {c['verif']}",
-            xref="paper", yref="paper", x=0.0, y=-0.11, showarrow=False,
+            xref="paper", yref="paper", x=0.0, y=-0.14, showarrow=False,
             font=dict(size=11, color="#24292f"), bgcolor="#f6f8fa", bordercolor="#d0d7de", borderwidth=1, borderpad=4
         )]
     )
@@ -1434,7 +1483,7 @@ build_category_decomp_plot("seasonal_sugar").show()
 build_category_decomp_plot("seasonal_food_nec").show()
 ```
 
-## Row 3 - EU-27 Cross-Country Comparison {.tabset height="380px"}
+## Row 3 - EU-27 Cross-Country Comparison {.tabset height="320px"}
 
 ```{python}
 #| echo: false
@@ -1557,8 +1606,8 @@ def build_seasonal_bar_plot(cat_k: str):
         yaxis=dict(title="m/m Inflation Rate (%)", tickformat=".1f"),
         xaxis=dict(title=f"Year (Observations {target_loc})"),
         template="plotly_white",
-        margin=dict(l=35, r=35, t=50, b=40),
-        height=450
+        margin=dict(l=35, r=35, t=40, b=35),
+        height=320
     )
     return fig
 ```
@@ -1600,7 +1649,7 @@ dict(value=init_data["seasonal_kpi"]["dev_str"], subtext="Difference: Current no
 dict(value=init_data["seasonal_kpi"]["range_str"], subtext=f"Lowest and highest observed rate {init_data['seasonal_kpi']['month_loc']}")
 ```
 
-## Row 2 - Historical m/m Dynamics vs Current Nowcast {.tabset height="520px"}
+## Row 2 - Historical m/m Dynamics vs Current Nowcast {.tabset height="390px"}
 
 ### ★ Total Food (CP011)
 
@@ -1776,11 +1825,11 @@ def build_conv_chart(cat_k: str):
         
     fig.update_layout(
         title=f"Nowcast convergence path W1 → W4: {cfg['title']}",
-        template="plotly_white", margin=dict(l=35, r=25, t=45, b=35), showlegend=True,
+        template="plotly_white", margin=dict(l=35, r=25, t=35, b=30), showlegend=True,
         legend=dict(orientation="h", y=-0.22),
         xaxis=dict(title="Monthly timeline (DG AGRI weekly releases)"),
         yaxis=dict(title="m/m Inflation Rate (%)", tickformat=".1f"),
-        height=340
+        height=300
     )
     return fig
 ```
@@ -1835,7 +1884,7 @@ def build_hist_chart():
         xaxis=dict(title="Target Month"),
         yaxis=dict(title="Total Revision (p.p.)", tickformat=".1f"),
         template="plotly_white",
-        margin=dict(l=35, r=25, t=40, b=30), height=280
+        margin=dict(l=35, r=25, t=35, b=25), height=250
     )
     return fig
 
