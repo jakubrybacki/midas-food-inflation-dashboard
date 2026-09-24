@@ -844,12 +844,19 @@ Selecting a country from the dropdown immediately updates all KPI cards, decompo
 }
 #within-month-revisions .bslib-grid {
   grid-template-columns: 1fr !important;
+  grid-auto-rows: auto !important;
   width: 100% !important;
+  gap: 15px !important;
 }
 #within-month-revisions .card {
   width: 100% !important;
   max-width: 100% !important;
-  margin-bottom: 20px !important;
+  height: auto !important;
+  margin-bottom: 15px !important;
+}
+#within-month-revisions .card-body {
+  height: auto !important;
+  padding: 14px !important;
 }
 
 /* Tables in Seasonal Pattern and Within-Month Revisions tabs - enhanced legibility and sticky headers */
@@ -1737,7 +1744,7 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 
 # 🔄 Within-Month Revisions {icon="arrow-repeat" scrolling="true"}
 
-## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4)
+## Row 1 - Evolution of Nowcasts during Target Month (W1 → W4) {height="auto"}
 
 ```{python}
 #| echo: false
@@ -1746,7 +1753,7 @@ from IPython.display import HTML, display
 upcoming_text = "Week 4 is upcoming." if latest_w == 3 else ("Weeks 3 and 4 are upcoming." if latest_w < 3 else "Full month completed.")
 live_status = f"W{latest_w} In-Progress" if latest_w < 4 else "W1 &rarr; W4 Complete"
 
-banner_html = f"""<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 13.5px; gap: 10px;">
+rev_card_html = f"""<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-3 bg-light border rounded" style="font-size: 13.5px; gap: 10px;">
 <div class="d-flex align-items-center">
 <span class="me-2" style="font-size: 18px;">&#8505;&#65039;</span>
 <span><b>Data Release Monitoring:</b> Live target month is <b>{current_month_name} {t_year} (Week {latest_w} available)</b>. {upcoming_text} Switch to <b>{prev_month_name} {prev_y}</b> to inspect a completed month with full 4-week convergence.</span>
@@ -1755,13 +1762,8 @@ banner_html = f"""<div class="d-flex flex-wrap align-items-center justify-conten
 <button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')" style="font-weight: 600; padding: 6px 14px; font-size: 13px; cursor: pointer;">&#128197; {current_month_name} {t_year} (Live: {live_status})</button>
 <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')" style="font-weight: 600; padding: 6px 14px; font-size: 13px; cursor: pointer;">&#9989; {prev_month_name} {prev_y} (Full Month: W1 &rarr; W4)</button>
 </div>
-</div>"""
-
-display(HTML(banner_html))
-```
-
-```{=html}
-<div class="table-responsive" style="max-height: 440px; overflow-y: auto;">
+</div>
+<div class="table-responsive" style="max-height: 480px; overflow-y: auto;">
   <table class="table table-hover table-striped align-middle" style="font-size: 14.5px;">
     <thead class="table-light sticky-top">
       <tr>
@@ -1784,10 +1786,12 @@ display(HTML(banner_html))
       <!-- Wypełniane dynamicznie przez JS -->
     </tbody>
   </table>
-</div>
+</div>"""
+
+display(HTML(rev_card_html))
 ```
 
-## Row 2 - Convergence Paths {.tabset}
+## Row 2 - Convergence Paths {.tabset height="390px"}
 
 ```{python}
 #| echo: false
@@ -1824,12 +1828,22 @@ def build_conv_chart(cat_k: str):
         )
         
     fig.update_layout(
-        title=f"Nowcast convergence path W1 → W4: {cfg['title']}",
-        template="plotly_white", margin=dict(l=35, r=25, t=35, b=30), showlegend=True,
-        legend=dict(orientation="h", y=-0.22),
+        title=dict(text=f"Nowcast convergence path W1 → W4: {cfg['title']}", font=dict(size=14)),
+        template="plotly_white",
+        margin=dict(l=40, r=25, t=55, b=45),
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1.0,
+            font=dict(size=11),
+            bgcolor="rgba(255,255,255,0.7)"
+        ),
         xaxis=dict(title="Monthly timeline (DG AGRI weekly releases)"),
         yaxis=dict(title="m/m Inflation Rate (%)", tickformat=".1f"),
-        height=300
+        height=320
     )
     return fig
 ```
