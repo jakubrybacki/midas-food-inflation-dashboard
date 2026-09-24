@@ -15,6 +15,14 @@ jupyter: python3
 
 import os
 import sys
+
+# Ensure UTF-8 output encoding on Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
 import json
 import glob
 from datetime import datetime
@@ -1684,23 +1692,23 @@ build_seasonal_bar_plot("seasonal_food_nec").show()
 
 ```{python}
 #| echo: false
-#| output: asis
+from IPython.display import HTML, display
+
 upcoming_text = "Week 4 is upcoming." if latest_w == 3 else ("Weeks 3 and 4 are upcoming." if latest_w < 3 else "Full month completed.")
-live_status = f"W{latest_w} In-Progress" if latest_w < 4 else "W1 → W4 Complete"
-print(f"""
-<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 13.5px;">
-  <div class="d-flex align-items-center">
-    <span class="me-2" style="font-size: 18px;">ℹ️</span>
-    <span>
-      <b>Data Release Monitoring:</b> Live target month is <b>{current_month_name} {t_year} (Week {latest_w} available)</b>. {upcoming_text} Switch to <b>{prev_month_name} {prev_y}</b> to inspect a completed month with full 4-week convergence.
-    </span>
-  </div>
-  <div class="btn-group btn-group-sm mt-1 mt-md-0" role="group" id="month-rev-toggle">
-    <button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')">📅 {current_month_name} {t_year} (Live: {live_status})</button>
-    <button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')">✅ {prev_month_name} {prev_y} (Full Month: W1 → W4)</button>
-  </div>
+live_status = f"W{latest_w} In-Progress" if latest_w < 4 else "W1 &rarr; W4 Complete"
+
+banner_html = f"""<div class="d-flex flex-wrap align-items-center justify-content-between p-2 mb-2 bg-light border rounded" style="font-size: 13.5px; gap: 10px;">
+<div class="d-flex align-items-center">
+<span class="me-2" style="font-size: 18px;">&#8505;&#65039;</span>
+<span><b>Data Release Monitoring:</b> Live target month is <b>{current_month_name} {t_year} (Week {latest_w} available)</b>. {upcoming_text} Switch to <b>{prev_month_name} {prev_y}</b> to inspect a completed month with full 4-week convergence.</span>
 </div>
-""")
+<div class="btn-group btn-group-sm" role="group" id="month-rev-toggle" style="white-space: nowrap;">
+<button type="button" class="btn btn-primary active" id="btn-rev-sep" onclick="switchRevisionMode('current')" style="font-weight: 600; padding: 6px 14px; font-size: 13px; cursor: pointer;">&#128197; {current_month_name} {t_year} (Live: {live_status})</button>
+<button type="button" class="btn btn-outline-primary" id="btn-rev-aug" onclick="switchRevisionMode('completed')" style="font-weight: 600; padding: 6px 14px; font-size: 13px; cursor: pointer;">&#9989; {prev_month_name} {prev_y} (Full Month: W1 &rarr; W4)</button>
+</div>
+</div>"""
+
+display(HTML(banner_html))
 ```
 
 ```{=html}
